@@ -2,6 +2,21 @@
 
 Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI and a plain CLI fallback.
 
+![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)
+![yt-dlp](https://img.shields.io/badge/yt--dlp-backed-111827?style=flat-square)
+![Terminal UI](https://img.shields.io/badge/UI-curses-18181B?style=flat-square)
+![Platforms](https://img.shields.io/badge/Platforms-YouTube%20%7C%20TikTok%20%7C%20Reddit%20%7C%20Instagram%20%7C%20X%20%7C%20Pinterest-27272A?style=flat-square)
+
+## Preview
+
+<p align="center">
+  <img src="./docs/assets/terminal-preview.png" alt="clipdock terminal preview" width="88%" />
+</p>
+
+<p align="center">
+  <img src="./docs/assets/cli-help.png" alt="clipdock CLI help output" width="88%" />
+</p>
+
 ## Overview
 
 `clipdock` is for people who want a fast local downloader without a browser extension or desktop wrapper.
