@@ -14,6 +14,8 @@ Optional:
 brew install ffmpeg
 ```
 
+Windows interactive mode support comes from the `windows-curses` dependency in `requirements.txt`.
+
 ## Project Rules
 
 - keep the app local-first
@@ -23,14 +25,32 @@ brew install ffmpeg
 
 ## Testing Guidance
 
-This project does not currently have an automated test suite.
+Run the automated suite before opening a PR:
 
-Before opening a PR, manually verify:
+```bash
+python -m pytest
+```
+
+Then manually verify:
 
 1. interactive mode still starts
 2. non-interactive mode still parses arguments
 3. at least one known supported URL still resolves metadata
 4. audio-only and video modes still select sane quality profiles
+5. `--list-formats` and `--simulate` still produce sensible reports
+
+## Smoke Checklist
+
+Use one known good URL per advertised platform when making downloader changes:
+
+1. YouTube
+2. TikTok
+3. Reddit
+4. Instagram
+5. X
+6. Pinterest
+
+When a site requires authentication or region-specific access, verify the remediation path with `--cookies` or `--cookies-from-browser`.
 
 ## Documentation Standard
 
