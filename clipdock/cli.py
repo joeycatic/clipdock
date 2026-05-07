@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib
+import json
+import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,9 +23,11 @@ from .downloader import (
 )
 from .history import (
     cleanup_actions,
+    entry_to_dict,
     delete_entries,
     duplicate_groups,
     extract_media_identity,
+    get_entry,
     latest_duplicate,
     load_entries,
     record_download,
@@ -30,6 +37,8 @@ from .inspector import collect_doctor_checks, render_history_entry
 from .models import (
     APP_NAME,
     ARGPARSE_TEMPLATE_HELP,
+    REMUX_CONTAINERS,
+    SUPPORTED_PLATFORMS,
     AppConfig,
     AuthSettings,
     CleanupAction,
@@ -41,8 +50,21 @@ from .models import (
     QualityOption,
     ResolvedPlan,
 )
+from .paths import state_dir, watch_log_path, watch_pid_path
 from .platforms import classify_platform_error, get_platform, infer_platform_from_url, normalize_url, platform_notes, youtube_url_has_playlist
-from .watcher import ClipboardMatch, watch_clipboard
+from .watcher import ClipboardMatch, has_seen_url, mark_seen_url, watch_clipboard
+
+
+def platform_choices(include_auto: bool = True) -> list[str]:
+    return (["auto"] if include_auto else []) + list(SUPPORTED_PLATFORMS)
+
+
+def parse_remux_container(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in REMUX_CONTAINERS:
+        choices = ", ".join(REMUX_CONTAINERS)
+        raise argparse.ArgumentTypeError(f"Unsupported remux container. Use one of: {choices}.")
+    return normalized
 
 
 def parse_browser_spec(value: str) -> tuple[str, str | None]:
@@ -157,7 +179,7 @@ def add_download_arguments(
     parser.add_argument(
         "--platform",
         default=argparse.SUPPRESS if raw else "auto",
-        choices=["auto", "youtube", "tiktok", "reddit", "instagram", "x", "pinterest"],
+        choices=platform_choices(include_auto=True),
         help="Source platform. Default: auto",
     )
     parser.add_argument("--audio-only", **_bool_action_kwargs(raw, "Download audio only.", False))
@@ -176,6 +198,21 @@ def add_download_arguments(
         "--filename-template",
         default=argparse.SUPPRESS if raw else "%(title)s.%(ext)s",
         help=f"yt-dlp output template. Default: {ARGPARSE_TEMPLATE_HELP}",
+    )
+    parser.add_argument("--write-subs", **_bool_action_kwargs(raw, "Write subtitle files when available.", False))
+    parser.add_argument("--write-auto-subs", **_bool_action_kwargs(raw, "Write auto-generated subtitles when available.", False))
+    parser.add_argument("--sub-lang", default=argparse.SUPPRESS if raw else None, help="Subtitle languages, comma separated. Example: en,en-US")
+    parser.add_argument("--embed-subs", **_bool_action_kwargs(raw, "Embed subtitles into the media file when supported.", False))
+    parser.add_argument("--write-thumbnail", **_bool_action_kwargs(raw, "Write the media thumbnail when available.", False))
+    parser.add_argument("--embed-thumbnail", **_bool_action_kwargs(raw, "Embed the media thumbnail when supported.", False))
+    parser.add_argument("--write-info-json", **_bool_action_kwargs(raw, "Write yt-dlp info JSON alongside the download.", False))
+    parser.add_argument("--embed-metadata", **_bool_action_kwargs(raw, "Embed metadata tags into the output file when supported.", False))
+    parser.add_argument("--split-chapters", **_bool_action_kwargs(raw, "Split chaptered media into separate files.", False))
+    parser.add_argument(
+        "--remux-video",
+        type=parse_remux_container,
+        default=argparse.SUPPRESS if raw else None,
+        help=f"Remux video output to one of: {', '.join(REMUX_CONTAINERS)}",
     )
     if include_preset:
         parser.add_argument("--preset", default=argparse.SUPPRESS if raw else None, help="Preset name to apply before CLI overrides.")
@@ -196,7 +233,7 @@ def add_download_arguments(
 def create_download_parser(*, raw: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Interactive multi-platform downloader powered by yt-dlp.",
-        epilog="Additional commands: watch, preset, use, history, duplicates, clean-duplicates, doctor",
+        epilog="Additional commands: batch, watch, preset, use, history, duplicates, clean-duplicates, doctor",
     )
     add_download_arguments(parser, raw=raw)
     return parser
@@ -245,6 +282,16 @@ def resolve_download_namespace(raw_args: argparse.Namespace, config: AppConfig, 
         debug=bool(raw.get("debug", False)),
         cookies=pick("cookies", None, preset.cookies if preset else None),
         cookies_from_browser=pick("cookies_from_browser", None, preset.cookies_from_browser if preset else None),
+        write_subs=pick("write_subs", False, preset.write_subs if preset else None),
+        write_auto_subs=pick("write_auto_subs", False, preset.write_auto_subs if preset else None),
+        sub_lang=pick("sub_lang", None, preset.sub_lang if preset else None),
+        embed_subs=pick("embed_subs", False, preset.embed_subs if preset else None),
+        write_thumbnail=pick("write_thumbnail", False, preset.write_thumbnail if preset else None),
+        embed_thumbnail=pick("embed_thumbnail", False, preset.embed_thumbnail if preset else None),
+        write_info_json=pick("write_info_json", False, preset.write_info_json if preset else None),
+        embed_metadata=pick("embed_metadata", False, preset.embed_metadata if preset else None),
+        split_chapters=pick("split_chapters", False, preset.split_chapters if preset else None),
+        remux_video=pick("remux_video", None, preset.remux_video if preset else None),
         preset=requested_preset,
         force=bool(raw.get("force", False)),
     )
@@ -269,6 +316,16 @@ def build_settings(args: argparse.Namespace, url: str, platform_key: str) -> Dow
         auth=args.auth,
         preset_name=getattr(args, "preset", None),
         force=bool(getattr(args, "force", False)),
+        write_subs=bool(getattr(args, "write_subs", False)),
+        write_auto_subs=bool(getattr(args, "write_auto_subs", False)),
+        sub_lang=getattr(args, "sub_lang", None),
+        embed_subs=bool(getattr(args, "embed_subs", False)),
+        write_thumbnail=bool(getattr(args, "write_thumbnail", False)),
+        embed_thumbnail=bool(getattr(args, "embed_thumbnail", False)),
+        write_info_json=bool(getattr(args, "write_info_json", False)),
+        embed_metadata=bool(getattr(args, "embed_metadata", False)),
+        split_chapters=bool(getattr(args, "split_chapters", False)),
+        remux_video=getattr(args, "remux_video", None),
     )
 
 
@@ -373,6 +430,31 @@ def prompt_watch_action(preset_name: str | None) -> str:
     return "n"
 
 
+def summarize_extra_outputs(settings: DownloadSettings) -> str:
+    flags: list[str] = []
+    if settings.write_subs:
+        flags.append("subs")
+    if settings.write_auto_subs:
+        flags.append("auto-subs")
+    if settings.embed_subs:
+        flags.append("embed-subs")
+    if settings.write_thumbnail:
+        flags.append("thumbnail")
+    if settings.embed_thumbnail:
+        flags.append("embed-thumbnail")
+    if settings.write_info_json:
+        flags.append("info-json")
+    if settings.embed_metadata:
+        flags.append("embed-metadata")
+    if settings.split_chapters:
+        flags.append("split-chapters")
+    if settings.remux_video:
+        flags.append(f"remux={settings.remux_video}")
+    if settings.sub_lang:
+        flags.append(f"sub-lang={settings.sub_lang}")
+    return ", ".join(flags) if flags else "none"
+
+
 def describe_download_context(context: DownloadContext, reporter: CliReporter) -> None:
     settings = context.settings
     reporter.section("platform", context.plan.platform_label)
@@ -382,12 +464,18 @@ def describe_download_context(context: DownloadContext, reporter: CliReporter) -
     reporter.section("output", str(Path(settings.output_dir).expanduser()))
     reporter.section("ffmpeg", "ready" if context.has_ffmpeg else "missing")
     reporter.section("auth", settings.auth.describe())
+    reporter.section("extras", summarize_extra_outputs(settings))
     if context.plan.normalized_url != context.original_url:
         reporter.section("url", context.plan.normalized_url)
     if context.detected_platform and context.detected_platform != settings.platform:
         reporter.section("warning", f"url looks like {get_platform(context.detected_platform).option.label}, continuing anyway")
     reporter.section("title", context.info.get("title") or settings.url)
     reporter.section("creator", context.info.get("uploader") or context.info.get("channel") or context.info.get("uploader_id") or "Unknown creator")
+
+
+def find_duplicate_for_context(context: DownloadContext) -> Any:
+    extractor_key, media_id = extract_media_identity(context.info)
+    return latest_duplicate(context.plan.normalized_url, extractor_key=extractor_key, media_id=media_id)
 
 
 def run_download_from_context(
@@ -397,11 +485,14 @@ def run_download_from_context(
     reporter: CliReporter | None = None,
     duplicate_entry: Any = None,
     confirm_duplicate: bool = True,
+    skip_if_duplicate: bool = False,
 ) -> str | None:
     duplicate = duplicate_entry
-    extractor_key, media_id = extract_media_identity(context.info)
     if duplicate is None and not context.settings.force:
-        duplicate = latest_duplicate(context.plan.normalized_url, extractor_key=extractor_key, media_id=media_id)
+        duplicate = find_duplicate_for_context(context)
+    if duplicate is not None and not context.settings.force and skip_if_duplicate:
+        emit_text("status     skipped duplicate download")
+        return None
     if duplicate is not None and not context.settings.force and confirm_duplicate:
         if not confirm_duplicate_download(duplicate.output_path, duplicate.downloaded_at):
             emit_text("status     skipped duplicate download")
@@ -476,6 +567,16 @@ def create_preset_from_args(name: str, raw_args: argparse.Namespace) -> PresetCo
         filename_template=data.get("filename_template"),
         cookies=data.get("cookies"),
         cookies_from_browser=data.get("cookies_from_browser"),
+        write_subs=data.get("write_subs"),
+        write_auto_subs=data.get("write_auto_subs"),
+        sub_lang=data.get("sub_lang"),
+        embed_subs=data.get("embed_subs"),
+        write_thumbnail=data.get("write_thumbnail"),
+        embed_thumbnail=data.get("embed_thumbnail"),
+        write_info_json=data.get("write_info_json"),
+        embed_metadata=data.get("embed_metadata"),
+        split_chapters=data.get("split_chapters"),
+        remux_video=data.get("remux_video"),
     )
 
 
@@ -490,6 +591,16 @@ def format_preset(preset: PresetConfig) -> list[str]:
         "filename_template": preset.filename_template,
         "cookies": preset.cookies,
         "cookies_from_browser": preset.cookies_from_browser,
+        "write_subs": preset.write_subs,
+        "write_auto_subs": preset.write_auto_subs,
+        "sub_lang": preset.sub_lang,
+        "embed_subs": preset.embed_subs,
+        "write_thumbnail": preset.write_thumbnail,
+        "embed_thumbnail": preset.embed_thumbnail,
+        "write_info_json": preset.write_info_json,
+        "embed_metadata": preset.embed_metadata,
+        "split_chapters": preset.split_chapters,
+        "remux_video": preset.remux_video,
     }
     for key, value in fields.items():
         if value is not None:
@@ -563,13 +674,76 @@ def _format_duplicate_group_header(use_hash: bool, key: str) -> str:
     return f"{label:<10} {key}"
 
 
-def run_history_command(argv: list[str], _config: AppConfig) -> int:
-    parser = argparse.ArgumentParser(prog="clipdock history", description="Show recent download history.")
-    parser.add_argument("--platform", choices=["youtube", "tiktok", "reddit", "instagram", "x", "pinterest"], help="Filter by platform.")
-    parser.add_argument("--preset", help="Filter by preset name.")
-    parser.add_argument("--limit", type=int, default=20, help="Maximum number of rows to show.")
-    args = parser.parse_args(argv)
-    entries = load_entries(platform=args.platform, preset_name=args.preset, limit=max(1, args.limit))
+def create_batch_download_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="clipdock batch download", add_help=False)
+    add_download_arguments(
+        parser,
+        raw=True,
+        include_url=False,
+        include_ui=False,
+        include_diagnostics=False,
+        include_preset=True,
+        include_force=True,
+    )
+    return parser
+
+
+def load_batch_urls(path: str) -> list[str]:
+    urls: list[str] = []
+    with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            urls.append(line)
+    return urls
+
+
+def run_batch_command(argv: list[str], config: AppConfig) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock batch", description="Run newline-delimited media downloads in non-interactive mode.")
+    parser.add_argument("batch_file", help="Path to a newline-delimited URL file.")
+    parser.add_argument("--fail-fast", action="store_true", help="Stop on the first failed item.")
+    args, extra = parser.parse_known_args(argv)
+    raw_download_args = create_batch_download_parser().parse_args(extra)
+    resolved = resolve_download_namespace(raw_download_args, config)
+    urls = load_batch_urls(args.batch_file)
+    if not urls:
+        emit_text("status     no URLs found in batch file")
+        return 0
+
+    counts = {"downloaded": 0, "skipped_duplicate": 0, "failed": 0}
+    for index, url in enumerate(urls, start=1):
+        emit_text(f"batch      [{index}/{len(urls)}] {url}")
+        try:
+            context = build_download_context(resolved, url)
+            duplicate = None if context.settings.force else find_duplicate_for_context(context)
+            if duplicate is not None and not context.settings.force:
+                emit_text(f"duplicate  skipped existing download: {duplicate.output_path}")
+                counts["skipped_duplicate"] += 1
+                continue
+            output_path = run_download_from_context(resolved, context, confirm_duplicate=False)
+            if output_path is None:
+                counts["skipped_duplicate"] += 1
+                continue
+            emit_text(f"saved      {output_path}")
+            counts["downloaded"] += 1
+        except Exception as exc:  # noqa: BLE001
+            detected_platform = infer_platform_from_url(url) or (resolved.platform if resolved.platform != "auto" else "youtube")
+            emit_text(render_failure(exc, classify_platform_error(detected_platform, exc), debug=False))
+            counts["failed"] += 1
+            if args.fail_fast:
+                break
+
+    emit_text(
+        "summary    "
+        f"downloaded={counts['downloaded']} "
+        f"skipped_duplicate={counts['skipped_duplicate']} "
+        f"failed={counts['failed']}"
+    )
+    return 1 if counts["failed"] else 0
+
+
+def _emit_history_entries(entries: list[Any]) -> int:
     if not entries:
         emit_text("status     no history entries found")
         return 0
@@ -579,6 +753,136 @@ def run_history_command(argv: list[str], _config: AppConfig) -> int:
         for line in render_history_entry(entry):
             emit_text(line)
     return 0
+
+
+def run_history_list_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock history", description="Show recent download history.")
+    parser.add_argument("--platform", choices=platform_choices(include_auto=False), help="Filter by platform.")
+    parser.add_argument("--preset", help="Filter by preset name.")
+    parser.add_argument("--status", choices=["all", "present", "missing"], default="all", help="Filter by file presence.")
+    parser.add_argument("--query", help="Search original URL, normalized URL, and output path.")
+    parser.add_argument("--limit", type=int, default=20, help="Maximum number of rows to show.")
+    args = parser.parse_args(argv)
+    entries = load_entries(
+        platform=args.platform,
+        preset_name=args.preset,
+        query_text=args.query,
+        status=None if args.status == "all" else args.status,
+        limit=max(1, args.limit),
+    )
+    return _emit_history_entries(entries)
+
+
+def run_history_export_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock history export", description="Export download history.")
+    parser.add_argument("--format", choices=["json", "csv"], required=True)
+    parser.add_argument("--platform", choices=platform_choices(include_auto=False), help="Filter by platform.")
+    parser.add_argument("--preset", help="Filter by preset name.")
+    parser.add_argument("--status", choices=["all", "present", "missing"], default="all")
+    parser.add_argument("--query", help="Search original URL, normalized URL, and output path.")
+    args = parser.parse_args(argv)
+    entries = load_entries(
+        platform=args.platform,
+        preset_name=args.preset,
+        query_text=args.query,
+        status=None if args.status == "all" else args.status,
+    )
+    rows = [entry_to_dict(entry) for entry in entries]
+    if args.format == "json":
+        emit_text(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        emit_text("")
+        return 0
+    fieldnames = list(rows[0].keys())
+    writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    return 0
+
+
+def run_history_prune_missing_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock history prune-missing", description="Delete history rows for missing files.")
+    parser.add_argument("--yes", action="store_true", help="Delete missing rows without prompting.")
+    args = parser.parse_args(argv)
+    missing_entries = load_entries(status="missing")
+    if not missing_entries:
+        emit_text("status     no missing history entries found")
+        return 0
+    for entry in missing_entries:
+        emit_text(f"remove     {entry.output_path}")
+    if not args.yes and not _prompt_yes_no("Delete the missing history entries listed above? [y/N] ", default=False):
+        emit_text("status     prune cancelled")
+        return 1
+    delete_entries(missing_entries)
+    emit_text(f"status     removed {len(missing_entries)} missing history entries")
+    return 0
+
+
+def _open_directory(path: Path) -> bool:
+    directory = path.parent if path.suffix else path
+    if sys.platform == "darwin":
+        return subprocess.run(["open", str(directory)], check=False).returncode == 0
+    if sys.platform.startswith("win"):
+        return subprocess.run(["explorer", str(directory)], check=False).returncode == 0
+    if sys.platform.startswith("linux"):
+        return subprocess.run(["xdg-open", str(directory)], check=False).returncode == 0
+    return False
+
+
+def run_history_open_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock history open", description="Open the containing folder for a history entry.")
+    parser.add_argument("entry_id", type=int)
+    args = parser.parse_args(argv)
+    entry = get_entry(args.entry_id)
+    if entry is None:
+        emit_text(f"error      History entry {args.entry_id} was not found.")
+        return 1
+    target = Path(entry.output_path)
+    if not target.exists():
+        emit_text(f"error      Path is missing: {entry.output_path}")
+        return 1
+    if not _open_directory(target):
+        emit_text(f"path       {target.parent}")
+        return 1
+    emit_text(f"opened     {target.parent}")
+    return 0
+
+
+def run_history_redownload_command(argv: list[str], config: AppConfig) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock history redownload", description="Re-run a previous download.")
+    parser.add_argument("entry_id", type=int)
+    args = parser.parse_args(argv)
+    entry = get_entry(args.entry_id)
+    if entry is None:
+        emit_text(f"error      History entry {args.entry_id} was not found.")
+        return 1
+
+    raw_args_list: list[str] = []
+    if entry.preset_name:
+        raw_args_list.extend(["--preset", entry.preset_name])
+    else:
+        raw_args_list.extend(["--platform", entry.platform, "--quality", entry.quality_key])
+        if entry.mode == "audio":
+            raw_args_list.append("--audio-only")
+    raw_args_list.extend(["--non-interactive", entry.original_url])
+    raw_args = create_download_parser(raw=True).parse_args(raw_args_list)
+    resolved = resolve_download_namespace(raw_args, config)
+    return run_download_command(resolved)
+
+
+def run_history_command(argv: list[str], config: AppConfig) -> int:
+    if argv:
+        subcommand = argv[0]
+        if subcommand == "export":
+            return run_history_export_command(argv[1:])
+        if subcommand == "prune-missing":
+            return run_history_prune_missing_command(argv[1:])
+        if subcommand == "open":
+            return run_history_open_command(argv[1:])
+        if subcommand == "redownload":
+            return run_history_redownload_command(argv[1:], config)
+    return run_history_list_command(argv)
 
 
 def run_duplicates_command(argv: list[str], config: AppConfig) -> int:
@@ -651,8 +955,8 @@ def run_doctor_command(argv: list[str], _config: AppConfig) -> int:
     return 0
 
 
-def create_watch_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="clipdock watch", description="Watch the clipboard for supported URLs.")
+def create_watch_parser(prog: str = "clipdock watch run") -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog, description="Watch the clipboard for supported URLs.")
     parser.add_argument("--interval", type=float, default=argparse.SUPPRESS, help="Clipboard polling interval in seconds.")
     parser.add_argument("--auto", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS, help="Download matching clipboard URLs without prompting.")
     add_download_arguments(
@@ -681,19 +985,49 @@ def resolve_watch_namespace(raw_args: argparse.Namespace, config: AppConfig) -> 
     return resolved
 
 
-def handle_watch_match(match: ClipboardMatch, args: argparse.Namespace, seen_urls: set[str]) -> bool:
-    if match.normalized_url in seen_urls:
-        emit_text(f"watch      already handled this session: {match.normalized_url}")
+def _watch_pid_value() -> int | None:
+    path = watch_pid_path()
+    if not path.exists():
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _watch_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _clear_stale_watch_pid() -> None:
+    pid_path = watch_pid_path()
+    pid = _watch_pid_value()
+    if pid is None or _watch_process_alive(pid):
+        return
+    try:
+        pid_path.unlink()
+    except OSError:
+        return
+
+
+def handle_watch_match(match: ClipboardMatch, args: argparse.Namespace) -> bool:
+    if has_seen_url(match.normalized_url):
+        emit_text(f"watch      already handled previously: {match.normalized_url}")
         return True
-    seen_urls.add(match.normalized_url)
+    mark_seen_url(match.normalized_url)
 
     try:
         context = build_download_context(args, match.url)
     except Exception as exc:  # noqa: BLE001
         emit_text(render_failure(exc, classify_platform_error(match.platform, exc), debug=False))
         return True
-    extractor_key, media_id = extract_media_identity(context.info)
-    duplicate = None if args.force else latest_duplicate(match.normalized_url, extractor_key=extractor_key, media_id=media_id)
+    duplicate = None if args.force else find_duplicate_for_context(context)
     if args.auto and duplicate is not None and not args.force:
         emit_text(f"watch      duplicate skipped: {duplicate.output_path}")
         return True
@@ -724,16 +1058,131 @@ def handle_watch_match(match: ClipboardMatch, args: argparse.Namespace, seen_url
     return True
 
 
-def run_watch_command(argv: list[str], config: AppConfig) -> int:
+def run_watch_run_command(argv: list[str], config: AppConfig) -> int:
     args = resolve_watch_namespace(create_watch_parser().parse_args(argv), config)
     emit_text("watch      monitoring clipboard for supported URLs")
     emit_text(f'watch      preset={args.preset or "default"} interval={args.interval:.2f}s auto={str(args.auto).lower()}')
-    seen_urls: set[str] = set()
     return watch_clipboard(
         interval=args.interval,
         emit=emit_text,
-        on_match=lambda match: handle_watch_match(match, args, seen_urls),
+        on_match=lambda match: handle_watch_match(match, args),
     )
+
+
+def run_watch_start_command(argv: list[str], config: AppConfig) -> int:
+    _clear_stale_watch_pid()
+    pid = _watch_pid_value()
+    if pid is not None and _watch_process_alive(pid):
+        emit_text(f"watch      already running (pid={pid})")
+        return 1
+    args = resolve_watch_namespace(create_watch_parser("clipdock watch start").parse_args(argv), config)
+    log_path = watch_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-m", "clipdock", "watch", "run"]
+    command.extend(
+        [
+            "--interval",
+            str(args.interval),
+            "--auto" if args.auto else "--no-auto",
+            "--platform",
+            args.platform,
+            "--quality",
+            args.quality,
+            "--output-dir",
+            args.output_dir,
+            "--filename-template",
+            args.filename_template,
+        ]
+    )
+    if args.preset:
+        command.extend(["--preset", args.preset])
+    if args.audio_only:
+        command.append("--audio-only")
+    if args.playlist:
+        command.append("--playlist")
+    if args.force:
+        command.append("--force")
+    if args.cookies:
+        command.extend(["--cookies", args.cookies])
+    if args.cookies_from_browser:
+        command.extend(["--cookies-from-browser", args.cookies_from_browser])
+    for flag_name, cli_flag in (
+        ("write_subs", "--write-subs"),
+        ("write_auto_subs", "--write-auto-subs"),
+        ("embed_subs", "--embed-subs"),
+        ("write_thumbnail", "--write-thumbnail"),
+        ("embed_thumbnail", "--embed-thumbnail"),
+        ("write_info_json", "--write-info-json"),
+        ("embed_metadata", "--embed-metadata"),
+        ("split_chapters", "--split-chapters"),
+    ):
+        if getattr(args, flag_name, False):
+            command.append(cli_flag)
+    if args.sub_lang:
+        command.extend(["--sub-lang", args.sub_lang])
+    if args.remux_video:
+        command.extend(["--remux-video", args.remux_video])
+    with log_path.open("ab") as log_handle:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True,
+        )
+    watch_pid_path().write_text(str(process.pid), encoding="utf-8")
+    emit_text(f"watch      started pid={process.pid}")
+    emit_text(f"log        {log_path}")
+    return 0
+
+
+def run_watch_stop_command(argv: list[str], _config: AppConfig) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock watch stop", description="Stop the background clipboard watcher.")
+    parser.parse_args(argv)
+    _clear_stale_watch_pid()
+    pid = _watch_pid_value()
+    if pid is None or not _watch_process_alive(pid):
+        emit_text("watch      not running")
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        emit_text(f"error      could not stop watcher: {exc}")
+        return 1
+    try:
+        watch_pid_path().unlink()
+    except OSError:
+        pass
+    emit_text(f"watch      stopped pid={pid}")
+    return 0
+
+
+def run_watch_status_command(argv: list[str], _config: AppConfig) -> int:
+    parser = argparse.ArgumentParser(prog="clipdock watch status", description="Show background clipboard watcher status.")
+    parser.parse_args(argv)
+    _clear_stale_watch_pid()
+    pid = _watch_pid_value()
+    if pid is None or not _watch_process_alive(pid):
+        emit_text("watch      stopped")
+        return 0
+    emit_text(f"watch      running pid={pid}")
+    emit_text(f"log        {watch_log_path()}")
+    emit_text(f"state      {state_dir()}")
+    return 0
+
+
+def run_watch_command(argv: list[str], config: AppConfig) -> int:
+    if argv:
+        subcommand = argv[0]
+        if subcommand == "run":
+            return run_watch_run_command(argv[1:], config)
+        if subcommand == "start":
+            return run_watch_start_command(argv[1:], config)
+        if subcommand == "stop":
+            return run_watch_stop_command(argv[1:], config)
+        if subcommand == "status":
+            return run_watch_status_command(argv[1:], config)
+    return run_watch_run_command(argv, config)
 
 
 def run_download_command(args: argparse.Namespace) -> int:
@@ -756,6 +1205,8 @@ def dispatch(argv: list[str], config: AppConfig) -> int:
             return run_preset_command(argv[1:], config)
         if command == "use":
             return run_use_command(argv[1:], config)
+        if command == "batch":
+            return run_batch_command(argv[1:], config)
         if command == "history":
             return run_history_command(argv[1:], config)
         if command == "duplicates":

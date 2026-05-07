@@ -71,6 +71,13 @@ def encode_playlist_items(items: list[int] | None) -> str | None:
     return ",".join(str(item) for item in normalized)
 
 
+def parse_subtitle_languages(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    languages = [item.strip() for item in value.split(",") if item.strip()]
+    return languages or None
+
+
 def build_quality_options(info: dict[str, Any], has_ffmpeg: bool, platform_key: str) -> tuple[list[QualityOption], list[QualityOption]]:
     formats = info.get("formats") or []
     heights: dict[int, dict[str, Any]] = {}
@@ -220,6 +227,27 @@ def assemble_ydl_options(
         playlist_items = encode_playlist_items(settings.playlist_items)
         if playlist_items:
             options["playlist_items"] = playlist_items
+    subtitle_languages = parse_subtitle_languages(settings.sub_lang)
+    if settings.write_subs:
+        options["writesubtitles"] = True
+    if settings.write_auto_subs:
+        options["writeautomaticsub"] = True
+    if subtitle_languages:
+        options["subtitleslangs"] = subtitle_languages
+    if settings.embed_subs:
+        options["embedsubtitles"] = True
+    if settings.write_thumbnail:
+        options["writethumbnail"] = True
+    if settings.embed_thumbnail:
+        options["embedthumbnail"] = True
+    if settings.write_info_json:
+        options["writeinfojson"] = True
+    if settings.embed_metadata:
+        options["embedmetadata"] = True
+    if settings.split_chapters:
+        options["split_chapters"] = True
+    if settings.remux_video:
+        options["remuxvideo"] = settings.remux_video
     if quiet and not debug:
         options["logger"] = NullLogger()
     if progress is not None:
@@ -240,6 +268,8 @@ def resolve_output_path(ydl: yt_dlp.YoutubeDL, info: dict[str, Any], quality: Qu
             outtmpl = outtmpl.get("default", "")
         return str(Path(str(outtmpl)).parent)
     prepared = Path(ydl.prepare_filename(info))
+    if settings_remux_video := ydl.params.get("remuxvideo"):
+        return str(prepared.with_suffix(f".{settings_remux_video}"))
     if quality.final_extension:
         return str(prepared.with_suffix(f".{quality.final_extension}"))
     return str(prepared)

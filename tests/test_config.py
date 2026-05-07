@@ -15,6 +15,9 @@ def test_save_and_load_config_round_trip(tmp_path) -> None:  # type: ignore[no-u
                 quality="mp3",
                 output_dir="~/Music/Clips",
                 filename_template="%(uploader)s - %(title)s.%(ext)s",
+                write_subs=True,
+                sub_lang="en",
+                remux_video="mkv",
             )
         }
     )
@@ -25,6 +28,9 @@ def test_save_and_load_config_round_trip(tmp_path) -> None:  # type: ignore[no-u
     assert loaded.presets["music"].audio_only is True
     assert loaded.presets["music"].quality == "mp3"
     assert loaded.presets["music"].output_dir == "~/Music/Clips"
+    assert loaded.presets["music"].write_subs is True
+    assert loaded.presets["music"].sub_lang == "en"
+    assert loaded.presets["music"].remux_video == "mkv"
 
 
 def test_resolve_download_namespace_applies_preset_then_cli_override() -> None:
@@ -35,10 +41,11 @@ def test_resolve_download_namespace_applies_preset_then_cli_override() -> None:
                 audio_only=True,
                 quality="mp3",
                 output_dir="~/Music/Clips",
+                write_thumbnail=True,
             )
         }
     )
-    raw = cli.create_download_parser(raw=True).parse_args(["--preset", "music", "--quality", "m4a", "https://youtu.be/demo"])
+    raw = cli.create_download_parser(raw=True).parse_args(["--preset", "music", "--quality", "m4a", "--write-info-json", "https://youtu.be/demo"])
 
     resolved = cli.resolve_download_namespace(raw, config)
 
@@ -46,6 +53,8 @@ def test_resolve_download_namespace_applies_preset_then_cli_override() -> None:
     assert resolved.quality == "m4a"
     assert resolved.output_dir == "~/Music/Clips"
     assert resolved.preset == "music"
+    assert resolved.write_thumbnail is True
+    assert resolved.write_info_json is True
 
 
 def test_upsert_and_delete_preset_update_config() -> None:
@@ -55,4 +64,3 @@ def test_upsert_and_delete_preset_update_config() -> None:
 
     deleted = delete_preset(updated, "music")
     assert "music" not in deleted.presets
-

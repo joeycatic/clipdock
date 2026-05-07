@@ -22,6 +22,16 @@ def _load_preset(name: str, data: dict[str, Any]) -> PresetConfig:
         filename_template=_as_string(data.get("filename_template")),
         cookies=_as_string(data.get("cookies")),
         cookies_from_browser=_as_string(data.get("cookies_from_browser")),
+        write_subs=_as_bool(data.get("write_subs")),
+        write_auto_subs=_as_bool(data.get("write_auto_subs")),
+        sub_lang=_as_string(data.get("sub_lang")),
+        embed_subs=_as_bool(data.get("embed_subs")),
+        write_thumbnail=_as_bool(data.get("write_thumbnail")),
+        embed_thumbnail=_as_bool(data.get("embed_thumbnail")),
+        write_info_json=_as_bool(data.get("write_info_json")),
+        embed_metadata=_as_bool(data.get("embed_metadata")),
+        split_chapters=_as_bool(data.get("split_chapters")),
+        remux_video=_as_string(data.get("remux_video")),
     )
 
 
@@ -82,6 +92,16 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
                     "filename_template": preset.filename_template,
                     "cookies": preset.cookies,
                     "cookies_from_browser": preset.cookies_from_browser,
+                    "write_subs": preset.write_subs,
+                    "write_auto_subs": preset.write_auto_subs,
+                    "sub_lang": preset.sub_lang,
+                    "embed_subs": preset.embed_subs,
+                    "write_thumbnail": preset.write_thumbnail,
+                    "embed_thumbnail": preset.embed_thumbnail,
+                    "write_info_json": preset.write_info_json,
+                    "embed_metadata": preset.embed_metadata,
+                    "split_chapters": preset.split_chapters,
+                    "remux_video": preset.remux_video,
                 }.items()
                 if value is not None
             }

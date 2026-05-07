@@ -21,6 +21,16 @@ def test_assemble_ydl_options_includes_auth_and_postprocessors() -> None:
         output_dir="C:/tmp",
         filename_template="%(title)s.%(ext)s",
         auth=AuthSettings(cookies="cookies.txt", cookies_from_browser=("chrome", "Default")),
+        write_subs=True,
+        write_auto_subs=True,
+        sub_lang="en,en-US",
+        embed_subs=True,
+        write_thumbnail=True,
+        embed_thumbnail=True,
+        write_info_json=True,
+        embed_metadata=True,
+        split_chapters=True,
+        remux_video="mp4",
     )
     quality = QualityOption(
         key="mp3",
@@ -40,6 +50,16 @@ def test_assemble_ydl_options_includes_auth_and_postprocessors() -> None:
     assert options["skip_download"] is True
     assert options["noplaylist"] is False
     assert options["ignoreerrors"] is True
+    assert options["writesubtitles"] is True
+    assert options["writeautomaticsub"] is True
+    assert options["subtitleslangs"] == ["en", "en-US"]
+    assert options["embedsubtitles"] is True
+    assert options["writethumbnail"] is True
+    assert options["embedthumbnail"] is True
+    assert options["writeinfojson"] is True
+    assert options["embedmetadata"] is True
+    assert options["split_chapters"] is True
+    assert options["remuxvideo"] == "mp4"
 
 
 def test_encode_playlist_items_sorts_and_deduplicates() -> None:

@@ -14,6 +14,9 @@ from clipdock.platforms import classify_platform_error, infer_platform_from_url,
         ("https://www.instagram.com/reel/abc/?utm_source=ig_web_copy_link", "instagram"),
         ("https://x.com/example/status/1", "x"),
         ("https://www.pinterest.com/pin/12345/", "pinterest"),
+        ("https://vimeo.com/12345", "vimeo"),
+        ("https://www.facebook.com/watch/?v=12345", "facebook"),
+        ("https://www.twitch.tv/videos/12345", "twitch"),
     ],
 )
 def test_infer_platform_from_url(url: str, expected: str) -> None:
@@ -40,6 +43,9 @@ def test_youtube_url_has_playlist_detects_watch_and_playlist_urls() -> None:
         ("x", "rate limit exceeded", "rate-limited"),
         ("tiktok", "captcha required", "blocked anonymous extraction"),
         ("pinterest", "unsupported URL", "did not expose a downloadable media stream"),
+        ("vimeo", "private video requires password", "authentication"),
+        ("facebook", "login required", "authenticated session"),
+        ("twitch", "subscriber-only stream", "authenticated session"),
     ],
 )
 def test_platform_error_classification(platform_key: str, message: str, expected: str) -> None:

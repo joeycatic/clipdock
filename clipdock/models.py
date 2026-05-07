@@ -13,6 +13,8 @@ DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads")
 ARGPARSE_TEMPLATE_HELP = DEFAULT_TEMPLATE.replace("%", "%%")
 MIN_HEIGHT = 28
 MIN_WIDTH = 96
+SUPPORTED_PLATFORMS = ("youtube", "tiktok", "reddit", "instagram", "x", "pinterest", "vimeo", "facebook", "twitch")
+REMUX_CONTAINERS = ("mp4", "mkv", "webm")
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,16 @@ class DownloadSettings:
     auth: AuthSettings = field(default_factory=AuthSettings)
     preset_name: str | None = None
     force: bool = False
+    write_subs: bool = False
+    write_auto_subs: bool = False
+    sub_lang: str | None = None
+    embed_subs: bool = False
+    write_thumbnail: bool = False
+    embed_thumbnail: bool = False
+    write_info_json: bool = False
+    embed_metadata: bool = False
+    split_chapters: bool = False
+    remux_video: str | None = None
 
 
 @dataclass
@@ -139,6 +151,16 @@ class PresetConfig:
     filename_template: str | None = None
     cookies: str | None = None
     cookies_from_browser: str | None = None
+    write_subs: bool | None = None
+    write_auto_subs: bool | None = None
+    sub_lang: str | None = None
+    embed_subs: bool | None = None
+    write_thumbnail: bool | None = None
+    embed_thumbnail: bool | None = None
+    write_info_json: bool | None = None
+    embed_metadata: bool | None = None
+    split_chapters: bool | None = None
+    remux_video: str | None = None
 
 
 @dataclass(frozen=True)

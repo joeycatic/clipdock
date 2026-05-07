@@ -22,3 +22,14 @@ def state_dir() -> Path:
 def history_path() -> Path:
     return state_dir() / "history.sqlite3"
 
+
+def watch_pid_path() -> Path:
+    return state_dir() / "watch.pid"
+
+
+def watch_log_path() -> Path:
+    return state_dir() / "watch.log"
+
+
+def watch_seen_path() -> Path:
+    return state_dir() / "watch_seen.sqlite3"

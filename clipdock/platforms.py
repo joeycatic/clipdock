@@ -53,6 +53,18 @@ def _normalize_pinterest(url: str) -> str:
     return _normalize_generic(url).rstrip("/")
 
 
+def _normalize_vimeo(url: str) -> str:
+    return _normalize_generic(url)
+
+
+def _normalize_facebook(url: str) -> str:
+    return _normalize_generic(url)
+
+
+def _normalize_twitch(url: str) -> str:
+    return _normalize_generic(url)
+
+
 def _base_option_overrides(auth: AuthSettings) -> dict[str, Any]:
     options: dict[str, Any] = {}
     if auth.cookies:
@@ -119,6 +131,30 @@ def _pinterest_error(message: str) -> FailureHelp | None:
         return FailureHelp("Pinterest appears to require a signed-in session for this pin.", ("Retry with --cookies-from-browser chrome or a cookie export.",))
     if _match_any(message, "unsupported", "unable to extract"):
         return FailureHelp("Pinterest did not expose a downloadable media stream for this pin.", ("Use --list-formats to confirm what the extractor can currently see.",))
+    return None
+
+
+def _vimeo_error(message: str) -> FailureHelp | None:
+    if _match_any(message, "login", "private", "password"):
+        return FailureHelp("Vimeo appears to require authentication for this media.", ("Retry with --cookies-from-browser chrome or a cookie export.",))
+    if _match_any(message, "geo", "region", "country"):
+        return FailureHelp("Vimeo restricted this media in the current region.", ("Retry from a session or network path that can access the video.",))
+    return None
+
+
+def _facebook_error(message: str) -> FailureHelp | None:
+    if _match_any(message, "login", "private", "not available", "checkpoint"):
+        return FailureHelp("Facebook appears to require an authenticated session for this media.", ("Retry with --cookies-from-browser chrome or a cookie export.",))
+    if _match_any(message, "rate limit", "temporarily blocked"):
+        return FailureHelp("Facebook blocked or rate-limited the extractor.", ("Retry later or use a signed-in browser cookie source.",))
+    return None
+
+
+def _twitch_error(message: str) -> FailureHelp | None:
+    if _match_any(message, "subscriber-only", "login", "private"):
+        return FailureHelp("Twitch requires an authenticated session for this media.", ("Retry with --cookies-from-browser chrome or a cookie export.",))
+    if _match_any(message, "live", "offline", "not available"):
+        return FailureHelp("This Twitch URL is not currently downloadable in the current state.", ("Retry when the VOD or clip is available.",))
     return None
 
 
@@ -200,6 +236,45 @@ PLATFORMS = [
         option_overrides=_base_option_overrides,
         classify_error=_pinterest_error,
         diagnostics_notes=("Pinterest extraction varies between public pins and signed-in-only boards.",),
+    ),
+    PlatformPolicy(
+        option=PlatformOption(
+            key="vimeo",
+            label="Vimeo",
+            description="Public videos and showcases",
+            url_prompt="Paste a Vimeo video URL",
+            domains=("vimeo.com", "www.vimeo.com", "player.vimeo.com"),
+        ),
+        normalize=_normalize_vimeo,
+        option_overrides=_base_option_overrides,
+        classify_error=_vimeo_error,
+        diagnostics_notes=("Vimeo private and password-protected videos usually need browser cookies.",),
+    ),
+    PlatformPolicy(
+        option=PlatformOption(
+            key="facebook",
+            label="Facebook",
+            description="Posts, reels, and watch URLs",
+            url_prompt="Paste a Facebook video, reel, or watch URL",
+            domains=("facebook.com", "www.facebook.com", "m.facebook.com", "fb.watch"),
+        ),
+        normalize=_normalize_facebook,
+        option_overrides=_base_option_overrides,
+        classify_error=_facebook_error,
+        diagnostics_notes=("Facebook extraction is more reliable with a signed-in browser session.",),
+    ),
+    PlatformPolicy(
+        option=PlatformOption(
+            key="twitch",
+            label="Twitch",
+            description="Clips and VOD URLs",
+            url_prompt="Paste a Twitch clip or VOD URL",
+            domains=("twitch.tv", "www.twitch.tv", "m.twitch.tv", "clips.twitch.tv"),
+        ),
+        normalize=_normalize_twitch,
+        option_overrides=_base_option_overrides,
+        classify_error=_twitch_error,
+        diagnostics_notes=("Twitch clips and VODs extract better than active live pages.",),
     ),
 ]
 PLATFORM_MAP = {platform.option.key: platform for platform in PLATFORMS}

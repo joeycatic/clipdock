@@ -72,6 +72,25 @@ def _entry_from_row(row: sqlite3.Row) -> HistoryEntry:
     )
 
 
+def entry_to_dict(entry: HistoryEntry) -> dict[str, Any]:
+    return {
+        "id": entry.id,
+        "original_url": entry.original_url,
+        "normalized_url": entry.normalized_url,
+        "extractor_key": entry.extractor_key,
+        "media_id": entry.media_id,
+        "platform": entry.platform,
+        "output_path": entry.output_path,
+        "mode": entry.mode,
+        "quality_key": entry.quality_key,
+        "preset_name": entry.preset_name,
+        "downloaded_at": entry.downloaded_at,
+        "file_size": entry.file_size,
+        "sha256": entry.sha256,
+        "status": "present" if Path(entry.output_path).exists() else "missing",
+    }
+
+
 def extract_media_identity(info: dict[str, Any]) -> tuple[str | None, str | None]:
     extractor_key = info.get("extractor_key") or info.get("extractor")
     media_id = info.get("id")
@@ -177,19 +196,29 @@ def latest_duplicate(
 def load_entries(
     *,
     db_path: Path | None = None,
+    entry_id: int | None = None,
     platform: str | None = None,
     preset_name: str | None = None,
+    query_text: str | None = None,
+    status: str | None = None,
     limit: int | None = None,
 ) -> list[HistoryEntry]:
     query = "SELECT * FROM downloads"
     filters: list[str] = []
     params: list[Any] = []
+    if entry_id is not None:
+        filters.append("id = ?")
+        params.append(entry_id)
     if platform:
         filters.append("platform = ?")
         params.append(platform)
     if preset_name:
         filters.append("preset_name = ?")
         params.append(preset_name)
+    if query_text:
+        filters.append("(original_url LIKE ? OR normalized_url LIKE ? OR output_path LIKE ?)")
+        like = f"%{query_text}%"
+        params.extend([like, like, like])
     if filters:
         query += " WHERE " + " AND ".join(filters)
     query += " ORDER BY downloaded_at DESC, id DESC"
@@ -198,7 +227,16 @@ def load_entries(
         params.append(limit)
     with connect_history(db_path) as connection:
         rows = connection.execute(query, params).fetchall()
-    return [_entry_from_row(row) for row in rows]
+    entries = [_entry_from_row(row) for row in rows]
+    if status in {"present", "missing"}:
+        wanted_exists = status == "present"
+        entries = [entry for entry in entries if Path(entry.output_path).exists() is wanted_exists]
+    return entries
+
+
+def get_entry(entry_id: int, *, db_path: Path | None = None) -> HistoryEntry | None:
+    entries = load_entries(db_path=db_path, entry_id=entry_id, limit=1)
+    return entries[0] if entries else None
 
 
 def _hash_entries(entries: Iterable[HistoryEntry], *, db_path: Path | None = None) -> list[HistoryEntry]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 
-from clipdock.history import cleanup_actions, connect_history, duplicate_groups, latest_duplicate, record_download
+from clipdock.history import cleanup_actions, connect_history, duplicate_groups, get_entry, latest_duplicate, load_entries, record_download
 from clipdock.models import AuthSettings, DownloadSettings, QualityOption
 
 
@@ -103,3 +103,25 @@ def test_connect_history_migrates_legacy_database(tmp_path) -> None:  # type: ig
 
     assert "extractor_key" in columns
     assert "media_id" in columns
+
+
+def test_load_entries_supports_query_and_status_filters(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    db_path = tmp_path / "history.sqlite3"
+    present = tmp_path / "present.mp4"
+    missing = tmp_path / "missing.mp4"
+    present.write_bytes(b"one")
+    missing.write_bytes(b"two")
+
+    record_download(make_settings("https://www.youtube.com/watch?v=query123"), QUALITY, "https://www.youtube.com/watch?v=query123", str(present), db_path=db_path)
+    record_download(make_settings("https://www.youtube.com/watch?v=missing456"), QUALITY, "https://www.youtube.com/watch?v=missing456", str(missing), db_path=db_path)
+    missing.unlink()
+
+    query_entries = load_entries(db_path=db_path, query_text="query123")
+    missing_entries = load_entries(db_path=db_path, status="missing")
+    present_entry = get_entry(query_entries[0].id, db_path=db_path)
+
+    assert len(query_entries) == 1
+    assert query_entries[0].output_path == str(present)
+    assert len(missing_entries) == 1
+    assert missing_entries[0].output_path == str(missing)
+    assert present_entry is not None
