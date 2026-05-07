@@ -1,6 +1,6 @@
 # clipdock
 
-Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI and a diagnostics-friendly CLI fallback.
+Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI, a packaged CLI, named presets, duplicate detection, and clipboard watch mode.
 
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-backed-111827?style=flat-square)
@@ -21,29 +21,25 @@ Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI
 
 `clipdock` is for people who want a fast local downloader without a browser extension or desktop wrapper.
 
-It supports a guided terminal UI for selecting:
+It supports:
 
-- platform
-- URL
-- optional playlist mode for YouTube playlist URLs
-- playlist queue review with per-item removal before download
-- video vs audio mode
-- quality profile
-- output directory
-- filename template
-
-It also supports a non-interactive CLI mode for scripting.
+- a guided terminal UI for selecting platform, URL, mode, quality, output path, and playlist queue
+- in-app `history` and `doctor` panels inside the interactive UI
+- a plain CLI for scripting and diagnostics
+- named presets for repeatable download workflows
+- duplicate detection before download
+- clipboard watch mode for daily-use automation
 
 ## Highlights
 
 | Capability | Details |
 | --- | --- |
 | Interactive terminal app | Full-screen curses interface with keyboard navigation |
-| Plain CLI mode | `--non-interactive` mode for shell usage, diagnostics, and scripts |
-| Platform-aware prompts | YouTube, TikTok, Reddit, Instagram, X, Pinterest |
-| Quality selection | Best available, capped resolutions, audio export profiles |
-| Local-first | Downloads directly to your machine |
-| `ffmpeg` aware | Detects whether muxing and audio conversion are available |
+| Packaged CLI | `clipdock "<url>"`, `python -m clipdock`, and editable installs |
+| Presets | Save reusable download profiles such as `music` or `youtube-1080` |
+| Duplicate handling | Detect existing downloads by extractor/media ID when available, then fall back to normalized URLs |
+| Clipboard watch | Poll the clipboard, detect supported URLs, and prompt or auto-download |
+| History and doctor | Inspect prior downloads and verify local runtime health |
 | Diagnostics | Inspect formats, simulate downloads, and enable debug reports |
 | Session support | Cookie-file and browser-cookie auth for restricted media |
 
@@ -51,7 +47,7 @@ It also supports a non-interactive CLI mode for scripting.
 
 | Platform | Notes |
 | --- | --- |
-| YouTube | Videos, shorts, music, public posts |
+| YouTube | Videos, shorts, music, public posts, playlists |
 | TikTok | Videos and share links |
 | Reddit | Posts, hosted videos, `v.redd.it` |
 | Instagram | Posts, reels, stories, highlights |
@@ -62,10 +58,9 @@ Support depends on what `yt-dlp` can extract successfully from the source.
 
 ## Requirements
 
-- Python 3.12 or newer recommended
-- `yt-dlp`
-- on Windows interactive mode: `windows-curses` is installed automatically from `requirements.txt`
+- Python 3.12 or newer
 - optional but strongly recommended: `ffmpeg`
+- Windows interactive mode uses `windows-curses`, installed automatically with the package
 
 Without `ffmpeg`:
 
@@ -75,19 +70,17 @@ Without `ffmpeg`:
 
 ## Installation
 
-### Option 1: virtual environment
+### Recommended
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
-### Option 2: existing Python environment
+### Compatibility entrypoint
 
-```bash
-pip install -r requirements.txt
-```
+`python main.py` still works, but the primary interface is now the packaged `clipdock` command.
 
 ### Optional: install ffmpeg
 
@@ -97,77 +90,184 @@ On macOS with Homebrew:
 brew install ffmpeg
 ```
 
-On Windows, install from `requirements.txt` in a normal Python environment. That includes the Windows curses runtime needed for the full-screen UI.
-
 ## Quick Start
 
 ### Interactive mode
 
 ```bash
-python main.py
+clipdock
 ```
 
-In the interactive UI, select `playlist` and enable it before running a YouTube playlist URL. When playlist metadata loads, open `queue` to review the entry list and remove items before starting the download. After a successful download, press `N` to start another URL with the current settings still loaded.
+After a successful interactive download, press `N` on the completion screen to jump straight to another URL while keeping the current platform and output settings.
 
-### Open directly with a URL
-
-```bash
-python main.py "https://www.youtube.com/watch?v=example"
-```
-
-### Download a YouTube playlist
+### Direct download
 
 ```bash
-python main.py --non-interactive --playlist "https://www.youtube.com/playlist?list=example"
+clipdock "https://www.youtube.com/watch?v=example"
 ```
 
 ### Non-interactive mode
 
 ```bash
-python main.py --non-interactive --platform youtube --quality 1080p "https://www.youtube.com/watch?v=example"
+clipdock --non-interactive --platform youtube --quality 1080p "https://www.youtube.com/watch?v=example"
 ```
 
 ### Audio-only export
 
 ```bash
-python main.py --non-interactive --audio-only --quality mp3 "https://www.youtube.com/watch?v=example"
+clipdock --non-interactive --audio-only --quality mp3 "https://www.youtube.com/watch?v=example"
+```
+
+### Download a YouTube playlist
+
+```bash
+clipdock --non-interactive --playlist "https://www.youtube.com/playlist?list=example"
 ```
 
 ### Inspect available formats
 
 ```bash
-python main.py --non-interactive --list-formats "https://www.reddit.com/video/example"
+clipdock --non-interactive --list-formats "https://www.reddit.com/video/example"
 ```
 
 ### Simulate without downloading
 
 ```bash
-python main.py --non-interactive --simulate --quality 720p "https://www.youtube.com/watch?v=example"
+clipdock --non-interactive --simulate --quality 720p "https://www.youtube.com/watch?v=example"
 ```
 
 ### Use browser cookies for restricted media
 
 ```bash
-python main.py --non-interactive --cookies-from-browser chrome "https://www.instagram.com/reel/example/"
+clipdock --non-interactive --cookies-from-browser chrome "https://www.instagram.com/reel/example/"
 ```
 
-## CLI Options
+## Presets
 
-| Flag | Purpose |
+Create a preset:
+
+```bash
+clipdock preset create music --audio-only --quality mp3 --output-dir ~/Music/Clips
+```
+
+Show or list presets:
+
+```bash
+clipdock preset show music
+clipdock preset list
+```
+
+Use a preset directly:
+
+```bash
+clipdock use music "https://www.youtube.com/watch?v=example"
+clipdock --preset music "https://www.youtube.com/watch?v=example"
+```
+
+Presets are stored in the user config file:
+
+- Linux example: `~/.config/clipdock/config.toml`
+- Windows example: `%AppData%\clipdock\config.toml`
+
+Example:
+
+```toml
+[presets.music]
+audio_only = true
+quality = "mp3"
+output_dir = "~/Music/Clips"
+filename_template = "%(uploader)s - %(title)s.%(ext)s"
+```
+
+## Duplicate Detection
+
+Before downloading, `clipdock` checks the local history database. When yt-dlp exposes a stable extractor/media ID, clipdock uses that identity first. If not, it falls back to normalized URL matching.
+
+Example flow:
+
+```text
+duplicate  This URL was already downloaded on 2026-05-07T00:11:00+00:00:
+path       C:\Users\Joey\Downloads\clipdock\video-title.mp4
+Download again? [y/N]
+```
+
+Duplicate utilities:
+
+```bash
+clipdock history
+clipdock history --platform youtube --limit 10
+clipdock duplicates
+clipdock duplicates --hash
+clipdock clean-duplicates
+clipdock clean-duplicates --hash --dry-run
+```
+
+History output includes the recorded platform, preset, quality, file path, and the duplicate identity key used for matching.
+
+Default cleanup behavior:
+
+- group duplicates by normalized URL unless `--hash` is used
+- keep the newest existing file
+- ask before deleting the older files
+
+## Clipboard Watch Mode
+
+Watch the clipboard and prompt when a supported URL appears:
+
+```bash
+clipdock watch
+```
+
+Use a preset:
+
+```bash
+clipdock watch --preset music
+```
+
+Auto-download with duplicate safety:
+
+```bash
+clipdock watch --auto --preset music
+```
+
+Watch mode behavior:
+
+- polls the clipboard every `0.75` seconds by default
+- detects the first supported URL in the clipboard text
+- ignores repeated clipboard content
+- skips URLs already seen in the current watch session
+- prompts with platform, title, preset, and duplicate warning unless `--auto` is enabled
+
+## CLI Commands
+
+| Command | Purpose |
 | --- | --- |
-| `--platform` | Choose the expected source platform or `auto` |
-| `--audio-only` | Download only audio |
-| `--playlist` | Allow playlist downloads instead of forcing a single item |
-| `--quality` | Set target quality such as `best`, `1080p`, `mp3`, `m4a` |
-| `--output-dir` | Choose the destination folder |
-| `--filename-template` | Pass a `yt-dlp` output template |
-| `--non-interactive` | Disable curses UI |
-| `--interactive` | Force curses UI |
-| `--list-formats` | Print the extractor-visible format table and exit |
-| `--simulate` | Resolve metadata, quality, and output path without downloading |
-| `--debug` | Print detailed policy and `yt-dlp` diagnostics |
-| `--cookies` | Use a Netscape-format cookie file |
-| `--cookies-from-browser` | Load cookies from a local browser profile |
+| `clipdock "<url>"` | Standard download flow |
+| `clipdock use <preset> "<url>"` | Download with a named preset |
+| `clipdock watch` | Watch the clipboard for supported URLs |
+| `clipdock history` | Show recent download history |
+| `clipdock preset create/list/show/delete` | Manage named presets |
+| `clipdock duplicates` | Show duplicate downloads |
+| `clipdock clean-duplicates` | Remove duplicate files after confirmation |
+| `clipdock doctor` | Check local dependencies and writable paths |
+
+Core flags still apply to the download flow:
+
+- `--platform`
+- `--audio-only`
+- `--playlist`
+- `--quality`
+- `--output-dir`
+- `--filename-template`
+- `--preset`
+- `--force`
+- `--non-interactive`
+- `--interactive`
+- `--list-formats`
+- `--simulate`
+- `--debug`
+- `--cookies`
+- `--cookies-from-browser`
 
 ## Interactive Controls
 
@@ -186,6 +286,11 @@ python main.py --non-interactive --cookies-from-browser chrome "https://www.inst
 - number keys `1-9` and `0` to jump between command rows
 - `q` to exit
 
+Interactive command list also includes:
+
+- `history` to inspect recent downloads without leaving the UI
+- `doctor` to inspect runtime health without leaving the UI
+
 ### Playlist queue
 
 - open `queue` after loading a playlist
@@ -196,26 +301,34 @@ python main.py --non-interactive --cookies-from-browser chrome "https://www.inst
 - `a` restores the full playlist queue
 - `q` closes the queue view
 
-After a successful interactive download, press `N` to jump straight to the next URL prompt and keep your current platform/output settings.
+Interactive duplicate detection now prompts before starting a duplicate transfer.
 
-## How It Works
+## Doctor
 
-1. infer the platform from the URL when possible
-2. fetch remote metadata with `yt-dlp`
-3. normalize the URL and apply platform-specific extractor policy
-4. build quality options based on available formats and `ffmpeg`
-5. optionally inspect or simulate the plan
-6. run the transfer with live progress hooks
-7. resolve the final output path and write to disk
+Run:
+
+```bash
+clipdock doctor
+```
+
+Current checks:
+
+- Python runtime
+- `ffmpeg` availability
+- clipboard access
+- config and state path writability
+- history database accessibility
+- default output directory writability
+- curses availability for interactive mode
 
 ## Project Layout
 
 ```text
-main.py            thin entrypoint
-clipdock/          CLI, UI, downloader, diagnostics, platform policy
+main.py            compatibility entrypoint
+pyproject.toml     package metadata and console script
+clipdock/          CLI, UI, downloader, config, history, watcher, diagnostics
 tests/             pytest regression suite
-requirements.txt   runtime dependency list
-docs/              additional usage and contributor notes
+docs/              additional usage notes
 ```
 
 ## Notes
