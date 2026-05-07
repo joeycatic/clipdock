@@ -181,6 +181,21 @@ def test_build_command_items_uses_grouped_main_menu() -> None:
     assert keys == ["source_group", "download_group", "output_group", "inspect_group", "run", "quit"]
 
 
+def test_init_colors_uses_white_text_for_selected_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    init_pair_calls: list[tuple[int, int, int]] = []
+
+    monkeypatch.setattr(ui.curses, "has_colors", lambda: True)
+    monkeypatch.setattr(ui.curses, "start_color", lambda: None)
+    monkeypatch.setattr(ui.curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(ui.curses, "init_pair", lambda pair, fg, bg: init_pair_calls.append((pair, fg, bg)))
+    monkeypatch.setattr(ui.curses, "color_pair", lambda pair: pair << 8)
+
+    palette = ui.init_colors()
+
+    assert (2, ui.curses.COLOR_WHITE, ui.curses.COLOR_CYAN) in init_pair_calls
+    assert palette["selected"] == (2 << 8) | ui.curses.A_BOLD
+
+
 def test_run_history_command_renders_entries(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     entry = HistoryEntry(
         id=1,
