@@ -9,6 +9,8 @@ Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI
 
 ## Preview
 
+Real screenshots from the current Windows build:
+
 <p align="center">
   <img src="./docs/assets/terminal-preview.png" alt="clipdock terminal preview" width="88%" />
 </p>
