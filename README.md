@@ -92,9 +92,19 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
 ### Compatibility entrypoint
 
 `python main.py` still works, but the primary interface is now the packaged `clipdock` command.
+
+If `pip install -e .` falls back to a user install on Windows, the `clipdock.exe` launcher is typically written to `C:\Users\<you>\AppData\Roaming\Python\Python3x\Scripts`. Add that directory to `PATH` if the `clipdock` command is not found.
 
 ### Optional: install ffmpeg
 

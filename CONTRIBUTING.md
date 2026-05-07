@@ -8,6 +8,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+If you install with a non-virtualenv Python and `pip` falls back to a user install, make sure your user scripts directory is on `PATH`. For Python 3.14 on Windows, that is typically `C:\Users\<you>\AppData\Roaming\Python\Python314\Scripts`.
+
 Optional:
 
 ```bash
