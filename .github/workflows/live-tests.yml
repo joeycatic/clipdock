@@ -1,0 +1,19 @@
+name: live-tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and test deps
+        run: python -m pip install --upgrade pip && pip install -e . pytest
+      - name: Run live smoke tests
+        env:
+          CLIPDOCK_LIVE_TESTS: "1"
+        run: python -m pytest -m live

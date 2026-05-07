@@ -8,6 +8,22 @@ version = "0.1.0"
 description = "Terminal-first media downloader built on yt-dlp."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+keywords = ["cli", "downloader", "media", "terminal", "yt-dlp"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet",
+  "Topic :: Multimedia :: Video",
+]
 dependencies = [
   "platformdirs",
   "pyperclip",
@@ -16,9 +32,18 @@ dependencies = [
   "windows-curses; platform_system == 'Windows'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/joeycatic/clipdock"
+Repository = "https://github.com/joeycatic/clipdock"
+Issues = "https://github.com/joeycatic/clipdock/issues"
+
 [project.scripts]
 clipdock = "clipdock.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["clipdock*"]
 
+[tool.pytest.ini_options]
+markers = [
+  "live: networked yt-dlp smoke tests that require CLIPDOCK_LIVE_TESTS=1",
+]
