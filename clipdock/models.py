@@ -66,6 +66,8 @@ class DownloadSettings:
     filename_template: str = DEFAULT_TEMPLATE
     quality_index: int = 0
     auth: AuthSettings = field(default_factory=AuthSettings)
+    preset_name: str | None = None
+    force: bool = False
 
 
 @dataclass
@@ -124,3 +126,83 @@ class ResolvedPlan:
     policy_notes: list[str]
     option_preview: dict[str, Any]
     detected_platform: str | None = None
+
+
+@dataclass(frozen=True)
+class PresetConfig:
+    name: str
+    platform: str | None = None
+    audio_only: bool | None = None
+    playlist: bool | None = None
+    quality: str | None = None
+    output_dir: str | None = None
+    filename_template: str | None = None
+    cookies: str | None = None
+    cookies_from_browser: str | None = None
+
+
+@dataclass(frozen=True)
+class WatchConfig:
+    interval: float = 0.75
+    auto: bool = False
+    preset: str | None = None
+
+
+@dataclass(frozen=True)
+class DuplicateConfig:
+    default_hash: bool = False
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    presets: dict[str, PresetConfig] = field(default_factory=dict)
+    watch: WatchConfig = field(default_factory=WatchConfig)
+    duplicates: DuplicateConfig = field(default_factory=DuplicateConfig)
+
+
+@dataclass(frozen=True)
+class DownloadContext:
+    original_url: str
+    detected_platform: str | None
+    settings: DownloadSettings
+    quality: QualityOption
+    info: dict[str, Any]
+    plan: ResolvedPlan
+    has_ffmpeg: bool
+
+
+@dataclass(frozen=True)
+class HistoryEntry:
+    id: int
+    original_url: str
+    normalized_url: str
+    extractor_key: str | None
+    media_id: str | None
+    platform: str
+    output_path: str
+    mode: str
+    quality_key: str
+    preset_name: str | None
+    downloaded_at: str
+    file_size: int | None
+    sha256: str | None
+
+    @property
+    def exists(self) -> bool:
+        return Path(self.output_path).exists()
+
+    @property
+    def is_file(self) -> bool:
+        return Path(self.output_path).is_file()
+
+
+@dataclass(frozen=True)
+class DuplicateGroup:
+    key: str
+    entries: list[HistoryEntry]
+
+
+@dataclass(frozen=True)
+class CleanupAction:
+    keep: HistoryEntry
+    remove: list[HistoryEntry]

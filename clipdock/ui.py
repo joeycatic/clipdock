@@ -18,15 +18,19 @@ from .downloader import (
     normalize_upload_date,
     shorten,
 )
+from .history import extract_media_identity, latest_duplicate, load_entries, record_download
+from .inspector import collect_doctor_checks, render_history_entry
 from .models import APP_NAME, APP_SUBTITLE, AppState, DownloadProgress, DownloadSettings, MIN_HEIGHT, MIN_WIDTH, QualityOption
-from .platforms import PLATFORMS, classify_platform_error, get_platform, infer_platform_from_url, youtube_url_has_playlist
+from .platforms import PLATFORMS, classify_platform_error, get_platform, infer_platform_from_url, normalize_url, youtube_url_has_playlist
 
 
-def safe_addstr(window: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
+def safe_addstr(window: curses.window, y: int, x: int, text: str, attr: int = 0, max_width: int | None = None) -> None:
     height, width = window.getmaxyx()
     if y < 0 or y >= height or x >= width:
         return
     max_len = max(0, width - x - 1)
+    if max_width is not None:
+        max_len = min(max_len, max_width)
     if max_len <= 0:
         return
     try:
@@ -86,7 +90,7 @@ def draw_box(window: curses.window, top: int, left: int, height: int, width: int
         safe_addstr(window, y, left + width - 1, "|", palette["border"])
     for y, x in ((top, left), (top, left + width - 1), (top + height - 1, left), (top + height - 1, left + width - 1)):
         safe_addstr(window, y, x, "+", palette["border"])
-    safe_addstr(window, top, left + 2, f"[ {title} ]", palette["heading"])
+    safe_addstr(window, top, left + 2, f"[ {title} ]", palette["heading"], max_width=max(0, width - 4))
 
 
 def wrap_lines(value: str, width: int, max_lines: int) -> list[str]:
@@ -149,6 +153,7 @@ def build_command_items(info: dict[str, Any], settings: DownloadSettings, curren
             ("quality", "quality", current_quality.label, current_quality.description),
             ("output", "output", settings.output_dir, "change the target folder"),
             ("template", "template", settings.filename_template, "change the yt-dlp naming template"),
+            ("misc", "misc", "history, doctor", "open utility tools such as history and doctor"),
             ("run", "run", "start download", "begin transfer with current settings"),
             ("quit", "quit", "exit", "leave the downloader"),
         ]
@@ -209,6 +214,26 @@ def prompt_input(stdscr: curses.window, palette: dict[str, int], title: str, pro
         if isinstance(key, str) and key.isprintable():
             value.insert(cursor, key)
             cursor += 1
+
+
+def prompt_confirm(stdscr: curses.window, palette: dict[str, int], title: str, lines: list[str], confirm_label: str) -> bool:
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(56, min(width - 6, 104))
+        box_height = max(9, min(height - 4, 12 + len(lines)))
+        top = max(2, (height - box_height) // 2)
+        left = max(2, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, title, palette)
+        for idx, line in enumerate(lines[: box_height - 4]):
+            safe_addstr(stdscr, top + 2 + idx, left + 2, shorten(line, box_width - 4), palette["body"])
+        safe_addstr(stdscr, top + box_height - 2, left + 2, f"{confirm_label} [y/N] | q cancel", palette["muted"])
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("y", "Y"):
+            return True
+        if key in ("n", "N", "q", "Q", "\x1b"):
+            return False
 
 
 def manage_playlist_queue_ui(
@@ -298,8 +323,151 @@ def manage_playlist_queue_ui(
                 kept.add(item_number)
 
 
+def show_text_modal(
+    stdscr: curses.window,
+    palette: dict[str, int],
+    title: str,
+    lines: list[str],
+    footer: str = "j/k or arrows move | PgUp/PgDn scroll | q close",
+) -> None:
+    scroll = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(64, min(width - 6, 120))
+        box_height = max(12, min(height - 4, 28))
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        visible_rows = max(1, box_height - 4)
+        max_scroll = max(0, len(lines) - visible_rows)
+        scroll = min(scroll, max_scroll)
+
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, title, palette)
+        for row in range(visible_rows):
+            line_index = scroll + row
+            if line_index >= len(lines):
+                break
+            safe_addstr(
+                stdscr,
+                top + 1 + row,
+                left + 2,
+                shorten(lines[line_index], box_width - 4),
+                palette["body"],
+                max_width=max(0, box_width - 4),
+            )
+        safe_addstr(
+            stdscr,
+            top + box_height - 2,
+            left + 2,
+            shorten(footer, box_width - 4),
+            palette["muted"],
+            max_width=max(0, box_width - 4),
+        )
+        stdscr.refresh()
+
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b", "\n", "\r"):
+            return
+        if key in (curses.KEY_UP, "k"):
+            scroll = max(0, scroll - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            scroll = min(max_scroll, scroll + 1)
+            continue
+        if key == curses.KEY_PPAGE:
+            scroll = max(0, scroll - visible_rows)
+            continue
+        if key == curses.KEY_NPAGE:
+            scroll = min(max_scroll, scroll + visible_rows)
+            continue
+
+
+def show_history_ui(stdscr: curses.window, palette: dict[str, int], state: AppState) -> None:
+    entries = load_entries(limit=20)
+    lines: list[str] = []
+    if not entries:
+        lines.append("No history entries found.")
+    else:
+        for idx, entry in enumerate(entries):
+            if idx:
+                lines.append("")
+            lines.extend(render_history_entry(entry))
+    show_text_modal(stdscr, palette, "history", lines)
+    state.status_line = "Closed history view."
+    state.log(state.status_line)
+
+
+def show_doctor_ui(stdscr: curses.window, palette: dict[str, int], state: AppState) -> None:
+    lines = ["doctor", "------"]
+    for label, ok, detail in collect_doctor_checks():
+        status = "ok" if ok else "warn"
+        lines.append(f"{label:<10} {status:<4} {detail}")
+    show_text_modal(stdscr, palette, "doctor", lines)
+    state.status_line = "Closed doctor view."
+    state.log(state.status_line)
+
+
+def manage_misc_ui(stdscr: curses.window, palette: dict[str, int], state: AppState) -> None:
+    items = [
+        ("history", "history", "recent downloads"),
+        ("doctor", "doctor", "system checks"),
+        ("back", "back", "return to main menu"),
+    ]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(46, min(width - 6, 72))
+        box_height = 10
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "misc", palette)
+        safe_addstr(stdscr, top + 1, left + 2, "Open utility tools from inside the interactive UI.", palette["body"], max_width=max(0, box_width - 4))
+        for idx, (_key, label, description) in enumerate(items):
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(
+                stdscr,
+                top + 3 + idx,
+                left + 2,
+                f" {idx + 1}. {label:<8} {shorten(description, box_width - 18)}",
+                attr,
+                max_width=max(0, box_width - 4),
+            )
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter select | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            state.status_line = "Closed misc menu."
+            state.log(state.status_line)
+            return
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if isinstance(key, str) and key.isdigit() and "1" <= key <= str(len(items)):
+            selected = int(key) - 1
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected][0]
+        if choice == "history":
+            show_history_ui(stdscr, palette, state)
+            continue
+        if choice == "doctor":
+            show_doctor_ui(stdscr, palette, state)
+            continue
+        state.status_line = "Returned to main menu."
+        state.log(state.status_line)
+        return
+
+
 def select_platform_ui(stdscr: curses.window, palette: dict[str, int], state: AppState, current_platform: str | None = None) -> str | None:
     selected = 0
+    picker_size = len(PLATFORMS) + 1
     if current_platform:
         for idx, policy in enumerate(PLATFORMS):
             if policy.option.key == current_platform:
@@ -318,24 +486,33 @@ def select_platform_ui(stdscr: curses.window, palette: dict[str, int], state: Ap
             platform = policy.option
             attr = palette["selected"] if idx == selected else palette["body"]
             safe_addstr(stdscr, top + 4 + idx, left + 2, f" {idx + 1}. {platform.label:<10} {shorten(platform.description, box_width - 20)}", attr)
-        active = PLATFORMS[selected].option
-        safe_addstr(stdscr, top + box_height - 4, left + 2, shorten(active.url_prompt, box_width - 4), palette["accent"])
-        safe_addstr(stdscr, top + box_height - 3, left + 2, shorten("Supported: " + ", ".join(active.domains), box_width - 4), palette["muted"])
-        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter select | 1-6 jump | q cancel", palette["muted"])
+        misc_attr = palette["selected"] if selected == len(PLATFORMS) else palette["body"]
+        safe_addstr(stdscr, top + 4 + len(PLATFORMS), left + 2, f" {len(PLATFORMS) + 1}. {'Misc':<10} history, doctor, back", misc_attr)
+        if selected < len(PLATFORMS):
+            active = PLATFORMS[selected].option
+            safe_addstr(stdscr, top + box_height - 4, left + 2, shorten(active.url_prompt, box_width - 4), palette["accent"])
+            safe_addstr(stdscr, top + box_height - 3, left + 2, shorten("Supported: " + ", ".join(active.domains), box_width - 4), palette["muted"])
+        else:
+            safe_addstr(stdscr, top + box_height - 4, left + 2, shorten("Open interactive utility tools before choosing a platform.", box_width - 4), palette["accent"])
+            safe_addstr(stdscr, top + box_height - 3, left + 2, shorten("Includes history, doctor, and a return path back here.", box_width - 4), palette["muted"])
+        safe_addstr(stdscr, top + box_height - 2, left + 2, f"j/k or arrows move | Enter select | 1-{picker_size} jump | q cancel", palette["muted"])
         stdscr.refresh()
         key = stdscr.get_wch()
         if key in ("q", "Q", "\x1b"):
             return None
         if key in (curses.KEY_UP, "k"):
-            selected = (selected - 1) % len(PLATFORMS)
+            selected = (selected - 1) % picker_size
             continue
         if key in (curses.KEY_DOWN, "j"):
-            selected = (selected + 1) % len(PLATFORMS)
+            selected = (selected + 1) % picker_size
             continue
-        if isinstance(key, str) and key.isdigit() and "1" <= key <= str(len(PLATFORMS)):
+        if isinstance(key, str) and key.isdigit() and "1" <= key <= str(picker_size):
             selected = int(key) - 1
             continue
         if key in ("\n", "\r", " "):
+            if selected == len(PLATFORMS):
+                manage_misc_ui(stdscr, palette, state)
+                continue
             choice = PLATFORMS[selected].option.key
             state.log(f"Platform selected: {get_platform(choice).option.label}.")
             return choice
@@ -389,7 +566,7 @@ def draw_progress_bar(stdscr: curses.window, y: int, x: int, width: int, percent
 def draw_logs(stdscr: curses.window, top: int, left: int, height: int, width: int, title: str, logs: list[str], palette: dict[str, int]) -> None:
     draw_box(stdscr, top, left, height, width, title, palette)
     for idx, entry in enumerate(logs[-max(0, height - 2) :]):
-        safe_addstr(stdscr, top + 1 + idx, left + 2, shorten(entry, width - 4), palette["body"])
+        safe_addstr(stdscr, top + 1 + idx, left + 2, shorten(entry, width - 4), palette["body"], max_width=max(0, width - 4))
 
 
 def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppState, info: dict[str, Any], settings: DownloadSettings, options: list[QualityOption], selected_index: int, has_ffmpeg: bool) -> None:
@@ -409,16 +586,22 @@ def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppS
     item_value = str(info.get("playlist_count") or len(playlist_entries(info))) if is_playlist else str(len(info.get("formats") or []))
     command_items = build_command_items(info, settings, current_quality)
     safe_addstr(stdscr, 1, 2, APP_NAME, palette["title"])
-    safe_addstr(stdscr, 1, 13, APP_SUBTITLE, palette["muted"])
+    safe_addstr(stdscr, 1, 13, shorten(APP_SUBTITLE, max(0, width - 46)), palette["muted"], max_width=max(0, width - 46))
     safe_addstr(stdscr, 1, width - 30, f"ffmpeg={'ready' if has_ffmpeg else 'missing'}", palette["success"] if has_ffmpeg else palette["warning"])
     left_width = max(40, width // 2 - 2)
     right_width = width - left_width - 6
     top = 3
     main_height = 16
+    left_content_width = max(0, left_width - 4)
+    right_content_width = max(0, right_width - 4)
     draw_box(stdscr, top, 2, main_height, left_width, "source", palette)
-    safe_addstr(stdscr, top + 1, 4, info.get("title") or "Unknown title", palette["heading"])
-    for idx, line in enumerate(wrap_lines(info.get("webpage_url") or settings.url, left_width - 4, 2)):
-        safe_addstr(stdscr, top + 2 + idx, 4, line, palette["muted"])
+    title_lines = wrap_lines(info.get("title") or "Unknown title", left_content_width, 2)
+    url_lines = wrap_lines(info.get("webpage_url") or settings.url, left_content_width, max(1, 3 - len(title_lines)))
+    for idx, line in enumerate(title_lines):
+        safe_addstr(stdscr, top + 1 + idx, 4, line, palette["heading"], max_width=left_content_width)
+    url_top = top + 1 + len(title_lines)
+    for idx, line in enumerate(url_lines):
+        safe_addstr(stdscr, url_top + idx, 4, line, palette["muted"], max_width=left_content_width)
     info_rows = [
         ("platform", platform.label),
         ("creator", info.get("uploader") or info.get("channel") or info.get("uploader_id") or "Unknown creator"),
@@ -431,14 +614,36 @@ def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppS
         ("playlist", playlist_label),
         ("quality", current_quality.label),
     ]
+    info_start = top + 1 + len(title_lines) + len(url_lines) + 1
     for idx, (label, value) in enumerate(info_rows):
-        safe_addstr(stdscr, top + 5 + idx, 4, f"{label:<10} {shorten(value, left_width - 16)}", palette["body"])
+        safe_addstr(
+            stdscr,
+            info_start + idx,
+            4,
+            f"{label:<10} {shorten(value, left_width - 16)}",
+            palette["body"],
+            max_width=left_content_width,
+        )
     draw_box(stdscr, top, left_width + 4, main_height, right_width, "commands", palette)
     for idx, (_command_key, label, value, description) in enumerate(command_items):
         attr = palette["selected"] if idx == selected_index else palette["body"]
-        safe_addstr(stdscr, top + 1 + idx, left_width + 6, f" {idx + 1}. {label:<8} {shorten(value, right_width - 16)}", attr)
+        safe_addstr(
+            stdscr,
+            top + 1 + idx,
+            left_width + 6,
+            f" {idx + 1}. {label:<8} {shorten(value, right_width - 16)}",
+            attr,
+            max_width=right_content_width,
+        )
         if idx == selected_index:
-            safe_addstr(stdscr, top + main_height - 4, left_width + 6, shorten(description, right_width - 4), palette["accent"])
+            safe_addstr(
+                stdscr,
+                top + main_height - 4,
+                left_width + 6,
+                shorten(description, right_width - 4),
+                palette["accent"],
+                max_width=right_content_width,
+            )
     logs_top = top + main_height + 1
     draw_logs(stdscr, logs_top, 2, height - logs_top - 4, width - 4, "activity", state.logs or ["[idle] waiting for input"], palette)
     safe_addstr(stdscr, height - 2, 2, shorten(state.status_line, width - 4), palette["accent"])
@@ -567,6 +772,8 @@ def interactive_app(stdscr: curses.window, args: Any) -> int:
         output_dir=args.output_dir,
         filename_template=args.filename_template,
         auth=args.auth,
+        preset_name=getattr(args, "preset", None),
+        force=bool(getattr(args, "force", False)),
     )
     pending_quality = args.quality
     selected_index = 0
@@ -705,13 +912,36 @@ def interactive_app(stdscr: curses.window, args: Any) -> int:
                     state.status_line = "Filename template updated."
                     state.log(f"Filename template set to {settings.filename_template}.")
                 continue
+            if selected_command == "misc":
+                manage_misc_ui(stdscr, palette, state)
+                continue
             if selected_command == "run":
                 if is_playlist_info(info) and not settings.playlist_items:
                     state.status_line = "The playlist queue is empty. Restore at least one entry before running."
                     state.log(state.status_line)
                     continue
+                duplicate = None
+                if not settings.force:
+                    extractor_key, media_id = extract_media_identity(info)
+                    duplicate = latest_duplicate(normalize_url(settings.platform, settings.url), extractor_key=extractor_key, media_id=media_id)
+                if duplicate is not None:
+                    confirmed = prompt_confirm(
+                        stdscr,
+                        palette,
+                        "duplicate detected",
+                        [
+                            f"Downloaded before: {duplicate.downloaded_at}",
+                            duplicate.output_path,
+                        ],
+                        "Download again?",
+                    )
+                    if not confirmed:
+                        state.status_line = "Duplicate download cancelled."
+                        state.log(state.status_line)
+                        continue
                 try:
                     output_path, post_action = run_download_ui(stdscr, palette, info, settings, options[settings.quality_index], state)
+                    record_download(settings, options[settings.quality_index], settings.url, output_path, info=info)
                     state.status_line = f"Saved to {output_path}"
                     if post_action == "new":
                         settings.url = ""

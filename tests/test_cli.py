@@ -3,10 +3,13 @@ from __future__ import annotations
 import builtins
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 from clipdock import cli
+from clipdock import ui
+from clipdock.models import AppConfig, HistoryEntry
 
 
 INFO = {
@@ -102,3 +105,93 @@ def test_run_interactive_falls_back_when_curses_missing(monkeypatch: pytest.Monk
 
     assert cli.run_interactive(args) == 3
     assert "falling back to plain cli" in capsys.readouterr().out.lower()
+
+
+def test_run_preset_command_create_list_show_delete(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    saved: dict[str, AppConfig] = {"config": AppConfig()}
+
+    def fake_save(config: AppConfig) -> None:
+        saved["config"] = config
+
+    monkeypatch.setattr(cli, "save_config", fake_save)
+
+    assert cli.run_preset_command(["create", "music", "--audio-only", "--quality", "mp3"], saved["config"]) == 0
+    config = saved["config"]
+    assert "music" in config.presets
+
+    assert cli.run_preset_command(["list"], config) == 0
+    assert "preset     music" in capsys.readouterr().out
+
+    assert cli.run_preset_command(["show", "music"], config) == 0
+    show_output = capsys.readouterr().out
+    assert "audio_only True" in show_output
+    assert "quality    mp3" in show_output
+
+    assert cli.run_preset_command(["delete", "music"], config) == 0
+    assert "deleted" in capsys.readouterr().out
+
+
+def test_dispatch_use_subcommand_applies_preset(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_download_command(args: object) -> int:
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(cli, "run_download_command", fake_run_download_command)
+    config = AppConfig()
+    config = AppConfig(presets={"music": cli.PresetConfig(name="music", quality="mp3", audio_only=True)})
+
+    assert cli.dispatch(["use", "music", "https://youtu.be/demo"], config) == 0
+    args = captured["args"]
+    assert args is not None
+    assert getattr(args, "quality") == "mp3"
+    assert getattr(args, "audio_only") is True
+
+
+def test_build_command_items_includes_misc_menu() -> None:
+    settings = cli.DownloadSettings(platform="youtube", url="https://youtu.be/demo")
+    quality = cli.QualityOption(key="best", label="Best available", description="best", format_selector="best")
+
+    commands = ui.build_command_items({"title": "Demo", "formats": []}, settings, quality)
+    keys = [key for key, *_rest in commands]
+
+    assert "misc" in keys
+    assert "history" not in keys
+    assert "doctor" not in keys
+
+
+def test_run_history_command_renders_entries(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    entry = HistoryEntry(
+        id=1,
+        original_url="https://youtu.be/demo",
+        normalized_url="https://youtu.be/demo",
+        extractor_key="Youtube",
+        media_id="abc123",
+        platform="youtube",
+        output_path="C:/tmp/demo.mp4",
+        mode="video",
+        quality_key="best",
+        preset_name="music",
+        downloaded_at="2026-05-07T12:00:00+00:00",
+        file_size=1024,
+        sha256=None,
+    )
+    monkeypatch.setattr(cli, "load_entries", lambda **_kwargs: [entry])
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+
+    assert cli.run_history_command([], AppConfig()) == 0
+    output = capsys.readouterr().out
+    assert "id         1" in output
+    assert "identity   Youtube:abc123" in output
+    assert "preset     music" in output
+
+
+def test_run_doctor_command_reports_checks(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, "collect_doctor_checks", lambda: [("ffmpeg", True, "available"), ("clipboard", True, "clipboard access available")])
+
+    assert cli.run_doctor_command([], AppConfig()) == 0
+    output = capsys.readouterr().out
+    assert "doctor" in output
+    assert "ffmpeg     ok" in output
+    assert "clipboard  ok" in output

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipdock"
+version = "0.1.0"
+description = "Terminal-first media downloader built on yt-dlp."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "platformdirs",
+  "pyperclip",
+  "tomli-w",
+  "yt-dlp",
+  "windows-curses; platform_system == 'Windows'",
+]
+
+[project.scripts]
+clipdock = "clipdock.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["clipdock*"]
+
