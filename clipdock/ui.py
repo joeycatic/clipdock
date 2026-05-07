@@ -7,6 +7,8 @@ from typing import Any
 
 import curses
 
+from .config import get_preset, load_config, save_config
+from .diagnostics import render_formats, render_simulation
 from .downloader import (
     build_quality_options,
     download_media,
@@ -16,12 +18,13 @@ from .downloader import (
     format_views,
     match_quality,
     normalize_upload_date,
+    preview_output_path,
     shorten,
 )
 from .history import extract_media_identity, latest_duplicate, load_entries, record_download
 from .inspector import collect_doctor_checks, render_history_entry
-from .models import APP_NAME, APP_SUBTITLE, AppState, DownloadProgress, DownloadSettings, MIN_HEIGHT, MIN_WIDTH, QualityOption
-from .platforms import PLATFORMS, classify_platform_error, get_platform, infer_platform_from_url, normalize_url, youtube_url_has_playlist
+from .models import APP_NAME, APP_SUBTITLE, AppState, DownloadProgress, DownloadSettings, MIN_HEIGHT, MIN_WIDTH, PresetConfig, QualityOption, REMUX_CONTAINERS, ResolvedPlan
+from .platforms import PLATFORMS, classify_platform_error, get_platform, infer_platform_from_url, normalize_url, platform_notes, youtube_url_has_playlist
 
 
 def safe_addstr(window: curses.window, y: int, x: int, text: str, attr: int = 0, max_width: int | None = None) -> None:
@@ -137,28 +140,107 @@ def playlist_queue_label(info: dict[str, Any], settings: DownloadSettings) -> st
     return f"{kept}/{total} kept"
 
 
-def build_command_items(info: dict[str, Any], settings: DownloadSettings, current_quality: QualityOption) -> list[tuple[str, str, str, str]]:
-    mode_label = "video+audio" if settings.mode == "video" else "audio-only"
-    playlist_label = "enabled" if settings.playlist else "single item"
-    items = [
-        ("platform", "platform", get_platform(settings.platform).option.label, "switch source platform and restart the URL step"),
-        ("source", "source", settings.url or "unset", "edit the active URL"),
-        ("playlist", "playlist", playlist_label, "toggle playlist downloads for playlist-capable sources"),
-    ]
+def extras_summary(settings: DownloadSettings) -> str:
+    values: list[str] = []
+    if settings.write_subs:
+        values.append("subs")
+    if settings.write_auto_subs:
+        values.append("auto")
+    if settings.embed_subs:
+        values.append("embed-subs")
+    if settings.write_thumbnail:
+        values.append("thumb")
+    if settings.embed_thumbnail:
+        values.append("embed-thumb")
+    if settings.write_info_json:
+        values.append("info")
+    if settings.embed_metadata:
+        values.append("meta")
+    if settings.split_chapters:
+        values.append("chapters")
+    if settings.remux_video:
+        values.append(f"remux={settings.remux_video}")
+    if settings.sub_lang:
+        values.append(f"lang={settings.sub_lang}")
+    return ", ".join(values) if values else "none"
+
+
+def preset_label(settings: DownloadSettings) -> str:
+    return settings.preset_name or "none"
+
+
+def auth_label(settings: DownloadSettings) -> str:
+    return settings.auth.describe()
+
+
+def source_summary(settings: DownloadSettings) -> str:
+    preset = preset_label(settings)
+    auth = "auth" if settings.auth.cookies or settings.auth.cookies_from_browser else "no auth"
+    return f"{get_platform(settings.platform).option.label} | {preset} | {auth}"
+
+
+def download_summary(info: dict[str, Any], settings: DownloadSettings, current_quality: QualityOption) -> str:
+    parts = [("video+audio" if settings.mode == "video" else "audio-only"), current_quality.label]
     if is_playlist_info(info):
-        items.append(("queue", "queue", playlist_queue_label(info, settings), "review playlist entries and remove items from the queue"))
-    items.extend(
-        [
-            ("mode", "mode", mode_label, "toggle video+audio vs audio-only"),
-            ("quality", "quality", current_quality.label, current_quality.description),
-            ("output", "output", settings.output_dir, "change the target folder"),
-            ("template", "template", settings.filename_template, "change the yt-dlp naming template"),
-            ("misc", "misc", "history, doctor", "open utility tools such as history and doctor"),
-            ("run", "run", "start download", "begin transfer with current settings"),
-            ("quit", "quit", "exit", "leave the downloader"),
-        ]
-    )
-    return items
+        parts.append(playlist_queue_label(info, settings))
+    return " | ".join(parts)
+
+
+def output_summary(settings: DownloadSettings) -> str:
+    if extras_summary(settings) == "none":
+        return "folder, naming"
+    return f"folder, naming, {extras_summary(settings)}"
+
+
+def inspect_summary(info: dict[str, Any]) -> str:
+    return f"{len(info.get('formats') or [])} formats"
+
+
+def apply_preset_to_settings(settings: DownloadSettings, preset: PresetConfig) -> None:
+    settings.preset_name = preset.name
+    if preset.platform:
+        settings.platform = preset.platform
+    if preset.audio_only is not None:
+        settings.mode = "audio" if preset.audio_only else "video"
+    if preset.playlist is not None:
+        settings.playlist = preset.playlist
+    if preset.output_dir:
+        settings.output_dir = preset.output_dir
+    if preset.filename_template:
+        settings.filename_template = preset.filename_template
+    if preset.cookies is not None:
+        settings.auth.cookies = preset.cookies
+    if preset.cookies_from_browser is not None:
+        browser, _, profile = preset.cookies_from_browser.partition(":")
+        settings.auth.cookies_from_browser = (browser, profile or None) if browser else None
+    for field_name in (
+        "write_subs",
+        "write_auto_subs",
+        "embed_subs",
+        "write_thumbnail",
+        "embed_thumbnail",
+        "write_info_json",
+        "embed_metadata",
+        "split_chapters",
+    ):
+        value = getattr(preset, field_name)
+        if value is not None:
+            setattr(settings, field_name, value)
+    if preset.sub_lang is not None:
+        settings.sub_lang = preset.sub_lang
+    if preset.remux_video is not None:
+        settings.remux_video = preset.remux_video
+
+
+def build_command_items(info: dict[str, Any], settings: DownloadSettings, current_quality: QualityOption) -> list[tuple[str, str, str, str]]:
+    return [
+        ("source_group", "source", source_summary(settings), "platform, preset, url, and auth settings"),
+        ("download_group", "download", download_summary(info, settings, current_quality), "mode, quality, playlist, and queue"),
+        ("output_group", "output", output_summary(settings), "output folder, filename template, and extras"),
+        ("inspect_group", "inspect", inspect_summary(info), "formats and simulation tools"),
+        ("run", "run", "start download", "begin transfer with current settings"),
+        ("quit", "quit", "exit", "leave the downloader"),
+    ]
 
 
 def prompt_input(stdscr: curses.window, palette: dict[str, int], title: str, prompt: str, initial_value: str = "") -> str | None:
@@ -407,10 +489,306 @@ def show_doctor_ui(stdscr: curses.window, palette: dict[str, int], state: AppSta
     state.log(state.status_line)
 
 
+def show_preset_picker_ui(stdscr: curses.window, palette: dict[str, int], state: AppState, settings: DownloadSettings) -> str | None:
+    config = load_config()
+    if not config.presets:
+        state.status_line = "No presets are configured."
+        state.log(state.status_line)
+        return None
+    items = sorted(config.presets)
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(52, min(width - 6, 84))
+        box_height = max(12, min(height - 4, 18))
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "presets", palette)
+        safe_addstr(stdscr, top + 1, left + 2, "Select a preset to apply its defaults.", palette["body"], max_width=max(0, box_width - 4))
+        for idx, name in enumerate(items[: box_height - 5]):
+            preset = config.presets[name]
+            label = f" {idx + 1}. {name:<16} {shorten((preset.quality or 'default') + (' audio' if preset.audio_only else ''), box_width - 24)}"
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 3 + idx, left + 2, label, attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter apply | q cancel", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return None
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key in ("\n", "\r", " "):
+            chosen = items[selected]
+            apply_preset_to_settings(settings, config.presets[chosen])
+            state.status_line = f'Applied preset "{chosen}".'
+            state.log(state.status_line)
+            return config.presets[chosen].quality
+
+
+def edit_auth_ui(stdscr: curses.window, palette: dict[str, int], state: AppState, settings: DownloadSettings) -> None:
+    items = [
+        ("cookies", "cookie file", settings.auth.cookies or "none"),
+        ("browser", "browser cookies", settings.auth.describe() if settings.auth.cookies_from_browser else "none"),
+        ("clear", "clear auth", "remove all auth sources"),
+        ("back", "back", "return to session"),
+    ]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(52, min(width - 6, 86))
+        box_height = 11
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "auth", palette)
+        for idx, (_key, label, value) in enumerate(items):
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<16} {shorten(value, box_width - 24)}", attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter edit | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected][0]
+        if choice == "cookies":
+            updated = prompt_input(stdscr, palette, "cookie file", "Path to Netscape-format cookie file (leave blank to clear)", settings.auth.cookies or "")
+            settings.auth.cookies = updated or None
+            if updated:
+                settings.auth.cookies_from_browser = None
+            state.status_line = "Updated cookie-file auth setting."
+            state.log(state.status_line)
+            items[0] = ("cookies", "cookie file", settings.auth.cookies or "none")
+            items[1] = ("browser", "browser cookies", settings.auth.describe() if settings.auth.cookies_from_browser else "none")
+            continue
+        if choice == "browser":
+            updated = prompt_input(stdscr, palette, "browser cookies", "Browser cookie source such as chrome or chrome:Profile 1", "")
+            if updated:
+                browser, _, profile = updated.partition(":")
+                settings.auth.cookies_from_browser = (browser.strip(), profile.strip() or None)
+                settings.auth.cookies = None
+            else:
+                settings.auth.cookies_from_browser = None
+            state.status_line = "Updated browser-cookie auth setting."
+            state.log(state.status_line)
+            items[0] = ("cookies", "cookie file", settings.auth.cookies or "none")
+            items[1] = ("browser", "browser cookies", settings.auth.describe() if settings.auth.cookies_from_browser else "none")
+            continue
+        if choice == "clear":
+            settings.auth.cookies = None
+            settings.auth.cookies_from_browser = None
+            state.status_line = "Cleared auth settings."
+            state.log(state.status_line)
+            items[0] = ("cookies", "cookie file", "none")
+            items[1] = ("browser", "browser cookies", "none")
+            continue
+        return
+
+
+def manage_extras_ui(stdscr: curses.window, palette: dict[str, int], state: AppState, settings: DownloadSettings) -> None:
+    items = [
+        ("write_subs", "write subtitles"),
+        ("write_auto_subs", "write auto-subs"),
+        ("embed_subs", "embed subtitles"),
+        ("write_thumbnail", "write thumbnail"),
+        ("embed_thumbnail", "embed thumbnail"),
+        ("write_info_json", "write info json"),
+        ("embed_metadata", "embed metadata"),
+        ("split_chapters", "split chapters"),
+        ("sub_lang", "subtitle lang"),
+        ("remux_video", "remux video"),
+        ("back", "back"),
+    ]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(56, min(width - 6, 92))
+        box_height = max(14, min(height - 4, 18))
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "extras", palette)
+        for idx, (key_name, label) in enumerate(items):
+            if key_name == "back":
+                value = "return"
+            elif key_name in {"sub_lang", "remux_video"}:
+                value = getattr(settings, key_name) or "none"
+            else:
+                value = "on" if getattr(settings, key_name) else "off"
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<18} {value}", attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "Enter toggle/edit | j/k move | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected][0]
+        if choice == "back":
+            return
+        if choice == "sub_lang":
+            updated = prompt_input(stdscr, palette, "subtitle lang", "Comma-separated subtitle languages", settings.sub_lang or "")
+            settings.sub_lang = updated or None
+            state.status_line = "Updated subtitle language selection."
+            state.log(state.status_line)
+            continue
+        if choice == "remux_video":
+            updated = prompt_input(stdscr, palette, "remux video", f"Container ({', '.join(REMUX_CONTAINERS)}) or blank", settings.remux_video or "")
+            normalized = (updated or "").strip().lower()
+            if normalized and normalized not in REMUX_CONTAINERS:
+                state.status_line = f"Unsupported remux container: {normalized}"
+                state.log(state.status_line)
+                continue
+            settings.remux_video = normalized or None
+            state.status_line = "Updated remux container."
+            state.log(state.status_line)
+            continue
+        selected_label = dict(items).get(choice, choice)
+        setattr(settings, choice, not getattr(settings, choice))
+        state.status_line = f"{selected_label} {'enabled' if getattr(settings, choice) else 'disabled'}."
+        state.log(state.status_line)
+
+
+def build_ui_plan(info: dict[str, Any], settings: DownloadSettings, quality: QualityOption, has_ffmpeg: bool) -> ResolvedPlan:
+    return ResolvedPlan(
+        platform_key=settings.platform,
+        platform_label=get_platform(settings.platform).option.label,
+        requested_url=settings.url,
+        normalized_url=settings.url,
+        mode=settings.mode,
+        playlist=settings.playlist,
+        quality=quality,
+        output_path=preview_output_path(settings, info, quality),
+        has_ffmpeg=has_ffmpeg,
+        auth_description=settings.auth.describe(),
+        policy_notes=platform_notes(settings.platform),
+        option_preview={},
+        detected_platform=infer_platform_from_url(settings.url),
+    )
+
+
+def show_formats_ui(stdscr: curses.window, palette: dict[str, int], info: dict[str, Any], state: AppState) -> None:
+    show_text_modal(stdscr, palette, "formats", render_formats(info).splitlines())
+    state.status_line = "Closed formats view."
+    state.log(state.status_line)
+
+
+def show_simulation_ui(
+    stdscr: curses.window,
+    palette: dict[str, int],
+    info: dict[str, Any],
+    settings: DownloadSettings,
+    quality: QualityOption,
+    has_ffmpeg: bool,
+    state: AppState,
+) -> None:
+    plan = build_ui_plan(info, settings, quality, has_ffmpeg)
+    show_text_modal(stdscr, palette, "simulation", render_simulation(plan, info).splitlines())
+    state.status_line = "Closed simulation view."
+    state.log(state.status_line)
+
+
+def manage_watch_settings_ui(stdscr: curses.window, palette: dict[str, int], state: AppState) -> None:
+    config = load_config()
+    interval_text = f"{config.watch.interval:.2f}"
+    auto = config.watch.auto
+    preset = config.watch.preset or ""
+    items = ["interval", "auto", "preset", "save", "back"]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(52, min(width - 6, 86))
+        box_height = 11
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        rows = [
+            ("interval", interval_text),
+            ("auto", "on" if auto else "off"),
+            ("preset", preset or "none"),
+            ("save", "write to config"),
+            ("back", "return"),
+        ]
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "watch settings", palette)
+        for idx, (label, value) in enumerate(rows):
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<12} {value}", attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "Enter edit/toggle | j/k move | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected]
+        if choice == "interval":
+            updated = prompt_input(stdscr, palette, "watch interval", "Polling interval in seconds", interval_text)
+            if updated:
+                try:
+                    if float(updated) <= 0:
+                        raise ValueError
+                    interval_text = updated
+                    state.status_line = "Updated watch polling interval."
+                    state.log(state.status_line)
+                except ValueError:
+                    state.status_line = "Watch interval must be a positive number."
+                    state.log(state.status_line)
+            continue
+        if choice == "auto":
+            auto = not auto
+            state.status_line = f"Watch auto-download {'enabled' if auto else 'disabled'}."
+            state.log(state.status_line)
+            continue
+        if choice == "preset":
+            updated = prompt_input(stdscr, palette, "watch preset", "Default preset for watch run/start (blank clears)", preset)
+            preset = (updated or "").strip()
+            state.status_line = "Updated watch preset."
+            state.log(state.status_line)
+            continue
+        if choice == "save":
+            save_config(
+                config.__class__(
+                    presets=config.presets,
+                    watch=config.watch.__class__(interval=float(interval_text), auto=auto, preset=preset or None),
+                    duplicates=config.duplicates,
+                )
+            )
+            state.status_line = "Saved watch settings to config."
+            state.log(state.status_line)
+            return
+        return
+
+
 def manage_misc_ui(stdscr: curses.window, palette: dict[str, int], state: AppState) -> None:
     items = [
         ("history", "history", "recent downloads"),
         ("doctor", "doctor", "system checks"),
+        ("watch", "watch", "watch defaults"),
         ("back", "back", "return to main menu"),
     ]
     selected = 0
@@ -460,8 +838,279 @@ def manage_misc_ui(stdscr: curses.window, palette: dict[str, int], state: AppSta
         if choice == "doctor":
             show_doctor_ui(stdscr, palette, state)
             continue
+        if choice == "watch":
+            manage_watch_settings_ui(stdscr, palette, state)
+            continue
         state.status_line = "Returned to main menu."
         state.log(state.status_line)
+        return
+
+
+def manage_source_group_ui(
+    stdscr: curses.window,
+    palette: dict[str, int],
+    state: AppState,
+    settings: DownloadSettings,
+) -> tuple[str | None, str | None]:
+    items = [
+        ("platform", "platform", get_platform(settings.platform).option.label),
+        ("preset", "preset", preset_label(settings)),
+        ("source", "source", shorten(settings.url or "unset", 32)),
+        ("auth", "auth", auth_label(settings)),
+        ("back", "back", "return"),
+    ]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(56, min(width - 6, 90))
+        box_height = 11
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "source", palette)
+        for idx, (_key, label, value) in enumerate(items):
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<10} {shorten(value, box_width - 20)}", attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter select | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return None, None
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected][0]
+        if choice == "platform":
+            picked = select_platform_ui(stdscr, palette, state, settings.platform)
+            if picked and picked != settings.platform:
+                settings.platform = picked
+                settings.url = ""
+                settings.playlist_items = None
+                settings.quality_index = 0
+                state.status_line = f"Platform switched to {get_platform(picked).option.label}. Paste a new URL."
+                return "reload", None
+            continue
+        if choice == "preset":
+            selected_quality = show_preset_picker_ui(stdscr, palette, state, settings)
+            if selected_quality is not None:
+                settings.url = ""
+                settings.playlist_items = None
+                settings.quality_index = 0
+                state.status_line = f'Applied preset "{settings.preset_name}". Paste a URL to continue.'
+                return "reload", selected_quality
+            continue
+        if choice == "source":
+            updated = prompt_input(stdscr, palette, "source", get_platform(settings.platform).option.url_prompt, settings.url)
+            if updated and updated != settings.url:
+                settings.url = updated
+                settings.playlist_items = None
+                settings.quality_index = 0
+                align_platform_with_url(settings, state)
+                state.status_line = "Loading metadata for the updated URL."
+                state.log("URL updated. Reloading metadata.")
+                return "reload", None
+            continue
+        if choice == "auth":
+            previous_auth = auth_label(settings)
+            edit_auth_ui(stdscr, palette, state, settings)
+            if auth_label(settings) != previous_auth:
+                state.status_line = "Auth changed. Reloading metadata."
+                state.log(state.status_line)
+                return "reload", None
+            continue
+        return None, None
+
+
+def manage_download_group_ui(
+    stdscr: curses.window,
+    palette: dict[str, int],
+    state: AppState,
+    settings: DownloadSettings,
+    info: dict[str, Any],
+    options: list[QualityOption],
+) -> str | None:
+    while True:
+        items = [
+            ("playlist", "playlist", "enabled" if settings.playlist else "single item"),
+            ("mode", "mode", "video+audio" if settings.mode == "video" else "audio-only"),
+            ("quality", "quality", options[settings.quality_index].label),
+        ]
+        if is_playlist_info(info):
+            items.insert(1, ("queue", "queue", playlist_queue_label(info, settings)))
+        items.append(("back", "back", "return"))
+        selected = 0
+        while True:
+            height, width = stdscr.getmaxyx()
+            box_width = max(56, min(width - 6, 88))
+            box_height = 10 if len(items) <= 4 else 11
+            top = max(2, (height - box_height) // 2)
+            left = max(3, (width - box_width) // 2)
+            stdscr.erase()
+            draw_box(stdscr, top, left, box_height, box_width, "download", palette)
+            for idx, (_key, label, value) in enumerate(items):
+                attr = palette["selected"] if idx == selected else palette["body"]
+                safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<10} {shorten(value, box_width - 20)}", attr, max_width=max(0, box_width - 4))
+            safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k move | h/l cycle quality or mode | Enter select | q back", palette["muted"], max_width=max(0, box_width - 4))
+            stdscr.refresh()
+            key = stdscr.get_wch()
+            if key in ("q", "Q", "\x1b"):
+                return None
+            if key in (curses.KEY_UP, "k"):
+                selected = max(0, selected - 1)
+                continue
+            if key in (curses.KEY_DOWN, "j"):
+                selected = min(len(items) - 1, selected + 1)
+                continue
+            selected_command = items[selected][0]
+            if selected_command == "mode" and key in (curses.KEY_LEFT, curses.KEY_RIGHT, "h", "l"):
+                settings.mode = "audio" if settings.mode == "video" else "video"
+                settings.quality_index = 0
+                state.status_line = f"Mode switched to {settings.mode}."
+                state.log(state.status_line)
+                return None
+            if selected_command == "quality" and key in (curses.KEY_LEFT, curses.KEY_RIGHT, "h", "l"):
+                delta = -1 if key in (curses.KEY_LEFT, "h") else 1
+                settings.quality_index = cycle_index(settings.quality_index, delta, len(options))
+                state.status_line = f"Quality set to {options[settings.quality_index].label}."
+                state.log(state.status_line)
+                return None
+            if key not in ("\n", "\r", " "):
+                continue
+            if selected_command == "playlist":
+                settings.playlist = not settings.playlist
+                if not settings.playlist:
+                    settings.playlist_items = None
+                state.status_line = "Playlist downloads enabled." if settings.playlist else "Playlist downloads disabled."
+                state.log(f"Playlist mode changed to {'enabled' if settings.playlist else 'single item'}.")
+                if is_playlist_info(info) != settings.playlist:
+                    state.status_line = "Playlist mode changed. Reloading metadata."
+                    state.log("Reloading metadata to apply the new playlist mode.")
+                    return "reload"
+                return None
+            if selected_command == "queue":
+                manage_playlist_queue_ui(stdscr, palette, info, settings, state)
+                return None
+            if selected_command == "mode":
+                settings.mode = "audio" if settings.mode == "video" else "video"
+                settings.quality_index = 0
+                state.status_line = f"Mode switched to {settings.mode}."
+                state.log(state.status_line)
+                return None
+            if selected_command == "quality":
+                settings.quality_index = cycle_index(settings.quality_index, 1, len(options))
+                state.status_line = f"Quality set to {options[settings.quality_index].label}."
+                state.log(state.status_line)
+                return None
+            return None
+
+
+def manage_output_group_ui(stdscr: curses.window, palette: dict[str, int], state: AppState, settings: DownloadSettings) -> None:
+    items = [
+        ("output", "output", settings.output_dir),
+        ("template", "template", settings.filename_template),
+        ("extras", "extras", extras_summary(settings)),
+        ("back", "back", "return"),
+    ]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(58, min(width - 6, 94))
+        box_height = 10
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "output", palette)
+        items[0] = ("output", "output", settings.output_dir)
+        items[1] = ("template", "template", settings.filename_template)
+        items[2] = ("extras", "extras", extras_summary(settings))
+        for idx, (_key, label, value) in enumerate(items):
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<10} {shorten(value, box_width - 20)}", attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter select | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected][0]
+        if choice == "output":
+            updated = prompt_input(stdscr, palette, "output", "Folder for downloaded files", settings.output_dir)
+            if updated:
+                settings.output_dir = updated
+                state.status_line = f"Output folder updated to {settings.output_dir}."
+                state.log(state.status_line)
+            continue
+        if choice == "template":
+            updated = prompt_input(stdscr, palette, "template", "yt-dlp filename template", settings.filename_template)
+            if updated:
+                settings.filename_template = updated
+                state.status_line = "Filename template updated."
+                state.log(f"Filename template set to {settings.filename_template}.")
+            continue
+        if choice == "extras":
+            manage_extras_ui(stdscr, palette, state, settings)
+            continue
+        return
+
+
+def manage_inspect_group_ui(
+    stdscr: curses.window,
+    palette: dict[str, int],
+    state: AppState,
+    info: dict[str, Any],
+    settings: DownloadSettings,
+    quality: QualityOption,
+    has_ffmpeg: bool,
+) -> None:
+    items = [
+        ("formats", "formats", str(len(info.get("formats") or []))),
+        ("simulate", "simulate", "preview plan"),
+        ("back", "back", "return"),
+    ]
+    selected = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        box_width = max(48, min(width - 6, 78))
+        box_height = 9
+        top = max(2, (height - box_height) // 2)
+        left = max(3, (width - box_width) // 2)
+        stdscr.erase()
+        draw_box(stdscr, top, left, box_height, box_width, "inspect", palette)
+        for idx, (_key, label, value) in enumerate(items):
+            attr = palette["selected"] if idx == selected else palette["body"]
+            safe_addstr(stdscr, top + 2 + idx, left + 2, f" {idx + 1}. {label:<10} {shorten(value, box_width - 20)}", attr, max_width=max(0, box_width - 4))
+        safe_addstr(stdscr, top + box_height - 2, left + 2, "j/k or arrows move | Enter select | q back", palette["muted"], max_width=max(0, box_width - 4))
+        stdscr.refresh()
+        key = stdscr.get_wch()
+        if key in ("q", "Q", "\x1b"):
+            return
+        if key in (curses.KEY_UP, "k"):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, "j"):
+            selected = min(len(items) - 1, selected + 1)
+            continue
+        if key not in ("\n", "\r", " "):
+            continue
+        choice = items[selected][0]
+        if choice == "formats":
+            show_formats_ui(stdscr, palette, info, state)
+            continue
+        if choice == "simulate":
+            show_simulation_ui(stdscr, palette, info, settings, quality, has_ffmpeg, state)
+            continue
         return
 
 
@@ -487,14 +1136,14 @@ def select_platform_ui(stdscr: curses.window, palette: dict[str, int], state: Ap
             attr = palette["selected"] if idx == selected else palette["body"]
             safe_addstr(stdscr, top + 4 + idx, left + 2, f" {idx + 1}. {platform.label:<10} {shorten(platform.description, box_width - 20)}", attr)
         misc_attr = palette["selected"] if selected == len(PLATFORMS) else palette["body"]
-        safe_addstr(stdscr, top + 4 + len(PLATFORMS), left + 2, f" {len(PLATFORMS) + 1}. {'Misc':<10} history, doctor, back", misc_attr)
+        safe_addstr(stdscr, top + 4 + len(PLATFORMS), left + 2, f" {len(PLATFORMS) + 1}. {'Misc':<10} history, doctor, watch", misc_attr)
         if selected < len(PLATFORMS):
             active = PLATFORMS[selected].option
             safe_addstr(stdscr, top + box_height - 4, left + 2, shorten(active.url_prompt, box_width - 4), palette["accent"])
             safe_addstr(stdscr, top + box_height - 3, left + 2, shorten("Supported: " + ", ".join(active.domains), box_width - 4), palette["muted"])
         else:
             safe_addstr(stdscr, top + box_height - 4, left + 2, shorten("Open interactive utility tools before choosing a platform.", box_width - 4), palette["accent"])
-            safe_addstr(stdscr, top + box_height - 3, left + 2, shorten("Includes history, doctor, and a return path back here.", box_width - 4), palette["muted"])
+            safe_addstr(stdscr, top + box_height - 3, left + 2, shorten("Includes history, doctor, watch defaults, and a return path back here.", box_width - 4), palette["muted"])
         safe_addstr(stdscr, top + box_height - 2, left + 2, f"j/k or arrows move | Enter select | 1-{picker_size} jump | q cancel", palette["muted"])
         stdscr.refresh()
         key = stdscr.get_wch()
@@ -591,10 +1240,8 @@ def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppS
     left_width = max(40, width // 2 - 2)
     right_width = width - left_width - 6
     top = 3
-    main_height = 16
     left_content_width = max(0, left_width - 4)
     right_content_width = max(0, right_width - 4)
-    draw_box(stdscr, top, 2, main_height, left_width, "source", palette)
     title_lines = wrap_lines(info.get("title") or "Unknown title", left_content_width, 2)
     url_lines = wrap_lines(info.get("webpage_url") or settings.url, left_content_width, max(1, 3 - len(title_lines)))
     for idx, line in enumerate(title_lines):
@@ -604,6 +1251,7 @@ def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppS
         safe_addstr(stdscr, url_top + idx, 4, line, palette["muted"], max_width=left_content_width)
     info_rows = [
         ("platform", platform.label),
+        ("preset", preset_label(settings)),
         ("creator", info.get("uploader") or info.get("channel") or info.get("uploader_id") or "Unknown creator"),
         ("duration", format_duration(info.get("duration"))),
         ("views", format_views(info.get("view_count"))),
@@ -613,7 +1261,13 @@ def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppS
         ("mode", mode_label),
         ("playlist", playlist_label),
         ("quality", current_quality.label),
+        ("auth", auth_label(settings)),
+        ("extras", extras_summary(settings)),
     ]
+    info_required_height = 3 + len(title_lines) + len(url_lines) + len(info_rows)
+    commands_required_height = len(command_items) + 5
+    main_height = max(16, info_required_height, commands_required_height)
+    draw_box(stdscr, top, 2, main_height, left_width, "source", palette)
     info_start = top + 1 + len(title_lines) + len(url_lines) + 1
     for idx, (label, value) in enumerate(info_rows):
         safe_addstr(
@@ -647,8 +1301,7 @@ def draw_main_screen(stdscr: curses.window, palette: dict[str, int], state: AppS
     logs_top = top + main_height + 1
     draw_logs(stdscr, logs_top, 2, height - logs_top - 4, width - 4, "activity", state.logs or ["[idle] waiting for input"], palette)
     safe_addstr(stdscr, height - 2, 2, shorten(state.status_line, width - 4), palette["accent"])
-    jump_hint = "1-9 jump" if len(command_items) < 10 else "1-9,0 jump"
-    safe_addstr(stdscr, height - 1, 2, f"j/k or arrows move | h/l switch | Enter edit/run | {jump_hint} | q quit", palette["muted"])
+    safe_addstr(stdscr, height - 1, 2, "j/k or arrows move | Enter open | 1-6 jump | q quit", palette["muted"])
     stdscr.refresh()
 
 
@@ -774,6 +1427,16 @@ def interactive_app(stdscr: curses.window, args: Any) -> int:
         auth=args.auth,
         preset_name=getattr(args, "preset", None),
         force=bool(getattr(args, "force", False)),
+        write_subs=bool(getattr(args, "write_subs", False)),
+        write_auto_subs=bool(getattr(args, "write_auto_subs", False)),
+        sub_lang=getattr(args, "sub_lang", None),
+        embed_subs=bool(getattr(args, "embed_subs", False)),
+        write_thumbnail=bool(getattr(args, "write_thumbnail", False)),
+        embed_thumbnail=bool(getattr(args, "embed_thumbnail", False)),
+        write_info_json=bool(getattr(args, "write_info_json", False)),
+        embed_metadata=bool(getattr(args, "embed_metadata", False)),
+        split_chapters=bool(getattr(args, "split_chapters", False)),
+        remux_video=getattr(args, "remux_video", None),
     )
     pending_quality = args.quality
     selected_index = 0
@@ -832,88 +1495,28 @@ def interactive_app(stdscr: curses.window, args: Any) -> int:
                 selected_index = cycle_index(selected_index, 1, len(command_items))
                 continue
             if isinstance(key, str) and key.isdigit() and "1" <= key <= "9":
-                selected_index = int(key) - 1
-                continue
-            if key == "0" and len(command_items) >= 10:
-                selected_index = 9
+                selected_index = min(int(key) - 1, len(command_items) - 1)
                 continue
             selected_command = command_items[selected_index][0]
-            if selected_command == "mode" and key in (curses.KEY_LEFT, curses.KEY_RIGHT, "h", "l", "\n", "\r", " "):
-                settings.mode = "audio" if settings.mode == "video" else "video"
-                settings.quality_index = 0
-                state.status_line = f"Mode switched to {settings.mode}."
-                state.log(f"Mode changed to {settings.mode}.")
-                continue
-            if selected_command == "quality" and key in (curses.KEY_LEFT, curses.KEY_RIGHT, "h", "l", "\n", "\r"):
-                delta = -1 if key in (curses.KEY_LEFT, "h") else 1
-                settings.quality_index = cycle_index(settings.quality_index, delta, len(options))
-                state.status_line = f"Quality set to {options[settings.quality_index].label}."
-                state.log(f"Quality changed to {options[settings.quality_index].label}.")
-                continue
             if key not in ("\n", "\r"):
                 continue
-            if selected_command == "platform":
-                selected = select_platform_ui(stdscr, palette, state, settings.platform)
-                if selected and selected != settings.platform:
-                    settings.platform = selected
-                    settings.url = ""
-                    settings.playlist_items = None
-                    settings.quality_index = 0
-                    state.status_line = f"Platform switched to {get_platform(selected).option.label}. Paste a new URL."
+            if selected_command == "source_group":
+                action, selected_quality = manage_source_group_ui(stdscr, palette, state, settings)
+                if selected_quality:
+                    pending_quality = selected_quality
+                if action == "reload":
                     break
                 continue
-            if selected_command == "source":
-                updated = prompt_input(stdscr, palette, "source", get_platform(settings.platform).option.url_prompt, settings.url)
-                if updated and updated != settings.url:
-                    settings.url = updated
-                    settings.playlist_items = None
-                    settings.quality_index = 0
-                    align_platform_with_url(settings, state)
-                    state.status_line = "Loading metadata for the updated URL."
-                    state.log("URL updated. Reloading metadata.")
+            if selected_command == "download_group":
+                action = manage_download_group_ui(stdscr, palette, state, settings, info, options)
+                if action == "reload":
                     break
                 continue
-            if selected_command == "playlist":
-                settings.playlist = not settings.playlist
-                if not settings.playlist:
-                    settings.playlist_items = None
-                state.status_line = "Playlist downloads enabled." if settings.playlist else "Playlist downloads disabled."
-                state.log(f"Playlist mode changed to {'enabled' if settings.playlist else 'single item'}.")
-                if is_playlist_info(info) != settings.playlist:
-                    state.status_line = "Playlist mode changed. Reloading metadata."
-                    state.log("Reloading metadata to apply the new playlist mode.")
-                    break
+            if selected_command == "output_group":
+                manage_output_group_ui(stdscr, palette, state, settings)
                 continue
-            if selected_command == "queue":
-                manage_playlist_queue_ui(stdscr, palette, info, settings, state)
-                continue
-            if selected_command == "mode":
-                settings.mode = "audio" if settings.mode == "video" else "video"
-                settings.quality_index = 0
-                state.status_line = f"Mode switched to {settings.mode}."
-                state.log(f"Mode changed to {settings.mode}.")
-                continue
-            if selected_command == "quality":
-                settings.quality_index = cycle_index(settings.quality_index, 1, len(options))
-                state.status_line = f"Quality set to {options[settings.quality_index].label}."
-                state.log(f"Quality changed to {options[settings.quality_index].label}.")
-                continue
-            if selected_command == "output":
-                updated = prompt_input(stdscr, palette, "output", "Folder for downloaded files", settings.output_dir)
-                if updated:
-                    settings.output_dir = updated
-                    state.status_line = f"Output folder updated to {settings.output_dir}."
-                    state.log(f"Output folder set to {settings.output_dir}.")
-                continue
-            if selected_command == "template":
-                updated = prompt_input(stdscr, palette, "template", "yt-dlp filename template", settings.filename_template)
-                if updated:
-                    settings.filename_template = updated
-                    state.status_line = "Filename template updated."
-                    state.log(f"Filename template set to {settings.filename_template}.")
-                continue
-            if selected_command == "misc":
-                manage_misc_ui(stdscr, palette, state)
+            if selected_command == "inspect_group":
+                manage_inspect_group_ui(stdscr, palette, state, info, settings, options[settings.quality_index], has_ffmpeg)
                 continue
             if selected_command == "run":
                 if is_playlist_info(info) and not settings.playlist_items:

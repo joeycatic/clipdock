@@ -1,15 +1,15 @@
 # clipdock
 
-Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI, a packaged CLI, named presets, duplicate detection, and clipboard watch mode.
+Terminal-first media downloader built on `yt-dlp`, with an interactive curses UI, packaged CLI, named presets, duplicate detection, batch jobs, richer output options, and clipboard watch mode.
 
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-backed-111827?style=flat-square)
 ![Terminal UI](https://img.shields.io/badge/UI-curses-18181B?style=flat-square)
-![Platforms](https://img.shields.io/badge/Platforms-YouTube%20%7C%20TikTok%20%7C%20Reddit%20%7C%20Instagram%20%7C%20X%20%7C%20Pinterest-27272A?style=flat-square)
+![Platforms](https://img.shields.io/badge/Platforms-YouTube%20%7C%20TikTok%20%7C%20Reddit%20%7C%20Instagram%20%7C%20X%20%7C%20Pinterest%20%7C%20Vimeo%20%7C%20Facebook%20%7C%20Twitch-27272A?style=flat-square)
 
 ## Preview
 
-Real screenshots from the current Windows build:
+Real screenshots from the current app:
 
 <p align="center">
   <img src="./docs/assets/terminal-preview.png" alt="clipdock terminal preview" width="88%" />
@@ -26,11 +26,12 @@ Real screenshots from the current Windows build:
 It supports:
 
 - a guided terminal UI for selecting platform, URL, mode, quality, output path, and playlist queue
-- in-app `history` and `doctor` panels inside the interactive UI
+- in-app `history`, `doctor`, `formats`, `simulation`, auth, extras, and watch-settings panels inside the interactive UI
 - a plain CLI for scripting and diagnostics
 - named presets for repeatable download workflows
+- batch jobs from newline-delimited URL files
 - duplicate detection before download
-- clipboard watch mode for daily-use automation
+- persistent clipboard watch mode for daily-use automation
 
 ## Highlights
 
@@ -39,8 +40,10 @@ It supports:
 | Interactive terminal app | Full-screen curses interface with keyboard navigation |
 | Packaged CLI | `clipdock "<url>"`, `python -m clipdock`, and editable installs |
 | Presets | Save reusable download profiles such as `music` or `youtube-1080` |
+| Output extras | Subtitles, auto-subs, thumbnails, info JSON, embedded metadata, chapter splitting, and video remuxing |
+| Batch jobs | Run newline-delimited URL files with duplicate safety and summary output |
 | Duplicate handling | Detect existing downloads by extractor/media ID when available, then fall back to normalized URLs |
-| Clipboard watch | Poll the clipboard, detect supported URLs, and prompt or auto-download |
+| Clipboard watch | Run foreground or background clipboard monitoring with persistent seen-state |
 | History and doctor | Inspect prior downloads and verify local runtime health |
 | Diagnostics | Inspect formats, simulate downloads, and enable debug reports |
 | Session support | Cookie-file and browser-cookie auth for restricted media |
@@ -55,6 +58,9 @@ It supports:
 | Instagram | Posts, reels, stories, highlights |
 | X / Twitter | Post URLs from `x.com` and `twitter.com` |
 | Pinterest | Pins and video pins |
+| Vimeo | Public videos and showcases |
+| Facebook | Posts, reels, and watch URLs |
+| Twitch | Clips and VOD URLs |
 
 Support depends on what `yt-dlp` can extract successfully from the source.
 
@@ -72,7 +78,13 @@ Without `ffmpeg`:
 
 ## Installation
 
-### Recommended
+### End-user install
+
+```bash
+pipx install clipdock
+```
+
+### Contributor / local install
 
 ```bash
 python -m venv .venv
@@ -144,6 +156,18 @@ clipdock --non-interactive --simulate --quality 720p "https://www.youtube.com/wa
 clipdock --non-interactive --cookies-from-browser chrome "https://www.instagram.com/reel/example/"
 ```
 
+### Save metadata extras
+
+```bash
+clipdock --non-interactive --write-subs --sub-lang en --write-thumbnail --write-info-json "https://www.youtube.com/watch?v=example"
+```
+
+### Run a batch file
+
+```bash
+clipdock batch urls.txt --preset music
+```
+
 ## Presets
 
 Create a preset:
@@ -179,6 +203,8 @@ audio_only = true
 quality = "mp3"
 output_dir = "~/Music/Clips"
 filename_template = "%(uploader)s - %(title)s.%(ext)s"
+write_thumbnail = true
+write_info_json = true
 ```
 
 ## Duplicate Detection
@@ -198,6 +224,11 @@ Duplicate utilities:
 ```bash
 clipdock history
 clipdock history --platform youtube --limit 10
+clipdock history --status missing --query reels
+clipdock history export --format json
+clipdock history prune-missing
+clipdock history open 42
+clipdock history redownload 42
 clipdock duplicates
 clipdock duplicates --hash
 clipdock clean-duplicates
@@ -214,22 +245,30 @@ Default cleanup behavior:
 
 ## Clipboard Watch Mode
 
-Watch the clipboard and prompt when a supported URL appears:
+Watch the clipboard in the foreground and prompt when a supported URL appears:
 
 ```bash
-clipdock watch
+clipdock watch run
 ```
 
 Use a preset:
 
 ```bash
-clipdock watch --preset music
+clipdock watch run --preset music
 ```
 
 Auto-download with duplicate safety:
 
 ```bash
-clipdock watch --auto --preset music
+clipdock watch run --auto --preset music
+```
+
+Start the background watcher:
+
+```bash
+clipdock watch start --preset music --auto
+clipdock watch status
+clipdock watch stop
 ```
 
 Watch mode behavior:
@@ -237,7 +276,7 @@ Watch mode behavior:
 - polls the clipboard every `0.75` seconds by default
 - detects the first supported URL in the clipboard text
 - ignores repeated clipboard content
-- skips URLs already seen in the current watch session
+- skips URLs already seen in prior watch sessions
 - prompts with platform, title, preset, and duplicate warning unless `--auto` is enabled
 
 ## CLI Commands
@@ -246,7 +285,8 @@ Watch mode behavior:
 | --- | --- |
 | `clipdock "<url>"` | Standard download flow |
 | `clipdock use <preset> "<url>"` | Download with a named preset |
-| `clipdock watch` | Watch the clipboard for supported URLs |
+| `clipdock batch <file>` | Run newline-delimited batch downloads |
+| `clipdock watch run/start/stop/status` | Watch the clipboard in foreground or background |
 | `clipdock history` | Show recent download history |
 | `clipdock preset create/list/show/delete` | Manage named presets |
 | `clipdock duplicates` | Show duplicate downloads |
@@ -261,6 +301,10 @@ Core flags still apply to the download flow:
 - `--quality`
 - `--output-dir`
 - `--filename-template`
+- `--write-subs` / `--write-auto-subs` / `--sub-lang` / `--embed-subs`
+- `--write-thumbnail` / `--embed-thumbnail`
+- `--write-info-json` / `--embed-metadata`
+- `--split-chapters` / `--remux-video`
 - `--preset`
 - `--force`
 - `--non-interactive`
@@ -282,16 +326,23 @@ Core flags still apply to the download flow:
 
 ### Main screen
 
-- `j` / `k` or arrows to move between settings
-- `h` / `l` or arrows to cycle mode / quality where applicable
-- `Enter` to edit a field or start the download
-- number keys `1-9` and `0` to jump between command rows
+- `j` / `k` or arrows to move between command groups
+- `Enter` to open the selected group or start the download
+- number keys `1-6` to jump between command rows
 - `q` to exit
 
-Interactive command list also includes:
+Main command groups:
+
+- `source` for platform, preset, URL, and auth settings
+- `download` for playlist mode, queue management, mode, and quality
+- `output` for destination folder, filename template, and extras
+- `inspect` for formats and simulation views
+
+The initial platform picker still exposes `misc` for:
 
 - `history` to inspect recent downloads without leaving the UI
 - `doctor` to inspect runtime health without leaving the UI
+- `watch` settings to edit saved watch defaults
 
 ### Playlist queue
 

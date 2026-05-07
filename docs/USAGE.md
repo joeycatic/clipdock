@@ -2,6 +2,12 @@
 
 ## Install
 
+Preferred end-user install:
+
+```bash
+pipx install clipdock
+```
+
 Preferred local install:
 
 ```bash
@@ -43,6 +49,9 @@ clipdock --non-interactive --simulate "<url>"
 clipdock --non-interactive --debug "<url>"
 clipdock --non-interactive --cookies ./cookies.txt "<url>"
 clipdock --non-interactive --cookies-from-browser chrome "<url>"
+clipdock --non-interactive --write-subs --sub-lang en "<url>"
+clipdock --non-interactive --write-thumbnail --write-info-json "<url>"
+clipdock --non-interactive --embed-metadata --remux-video mp4 "<url>"
 ```
 
 ## Presets
@@ -81,6 +90,11 @@ Duplicate tools:
 ```bash
 clipdock history
 clipdock history --platform youtube --limit 10
+clipdock history --status missing --query reel
+clipdock history export --format csv
+clipdock history prune-missing
+clipdock history open 7
+clipdock history redownload 7
 clipdock duplicates
 clipdock duplicates --hash
 clipdock clean-duplicates
@@ -114,22 +128,30 @@ The doctor command verifies:
 
 ## Clipboard Watch Mode
 
-Prompt when a supported URL appears in the clipboard:
+Foreground watch:
 
 ```bash
-clipdock watch
+clipdock watch run
 ```
 
 Use a preset:
 
 ```bash
-clipdock watch --preset music
+clipdock watch run --preset music
 ```
 
 Auto-download:
 
 ```bash
-clipdock watch --auto --preset music
+clipdock watch run --auto --preset music
+```
+
+Background watch service:
+
+```bash
+clipdock watch start --auto --preset music
+clipdock watch status
+clipdock watch stop
 ```
 
 Watch mode:
@@ -137,29 +159,54 @@ Watch mode:
 - polls the clipboard every `0.75` seconds by default
 - detects the first supported URL in the clipboard text
 - ignores repeated clipboard values
-- skips URLs already processed during the current watch session
+- skips URLs already processed in prior watch sessions
 - in `--auto` mode, still skips duplicate URLs unless `--force` is set
+
+## Batch Jobs
+
+Run newline-delimited URLs from a file:
+
+```bash
+clipdock batch urls.txt --preset music
+clipdock batch urls.txt --fail-fast --quality 720p
+```
+
+Batch files:
+
+- ignore blank lines
+- ignore lines starting with `#`
+- continue after failures by default
+- emit a final summary for downloads, duplicate skips, and failures
 
 ## Interactive Mode
 
-The interactive UI still supports:
+The interactive UI supports:
 
 1. selecting a platform
 2. entering a URL
 3. resolving metadata
 4. choosing mode and quality
 5. managing a playlist queue when applicable
-6. opening `history` and `doctor` panels
-7. running the download
+6. editing presets, auth, and output extras
+7. opening `history`, `doctor`, `formats`, `simulation`, and watch-settings panels
+8. running the download
 
 After a successful interactive download, press `N` on the completion screen to jump straight to a fresh URL prompt without restarting the app.
 
 If a duplicate URL is detected in interactive mode, the UI now prompts before starting the transfer.
 
-The interactive command list includes:
+The main session screen is grouped into:
+
+- `source` for platform, preset, URL, and auth settings
+- `download` for playlist mode, queue, mode, and quality
+- `output` for destination, naming, and extras
+- `inspect` for formats and simulation
+
+The initial platform picker still includes `misc` for:
 
 - `history` to inspect recent downloads inside the UI
 - `doctor` to inspect runtime health inside the UI
+- `watch` settings to edit saved watch defaults
 
 ### Playlist Queue Controls
 
@@ -196,6 +243,17 @@ Override it with:
 clipdock --filename-template "%(uploader)s - %(title)s.%(ext)s" "<url>"
 ```
 
+Extra outputs:
+
+```bash
+clipdock --write-subs --sub-lang en,en-US "<url>"
+clipdock --write-auto-subs "<url>"
+clipdock --write-thumbnail --embed-thumbnail "<url>"
+clipdock --write-info-json --embed-metadata "<url>"
+clipdock --split-chapters "<url>"
+clipdock --remux-video mkv "<url>"
+```
+
 ## ffmpeg Behavior
 
 If `ffmpeg` is available:
@@ -213,7 +271,7 @@ If `ffmpeg` is missing:
 - terminal UI requires a reasonably large terminal window
 - extraction support depends on `yt-dlp`
 - some sites may rate limit or block requests depending on region, login state, or upstream changes
-- watch mode is CLI-only in v1; it does not run inside the curses UI
+- watch execution remains CLI-only; the curses UI edits watch defaults but does not run the watcher inline
 
 ## Manual Smoke Pass
 
@@ -224,4 +282,6 @@ For downloader, policy, preset, or duplicate changes, manually verify:
 3. one `--simulate` run
 4. one preset-backed download
 5. one duplicate prompt flow
-6. one `clipdock watch --preset <name>` session with a supported URL copied into the clipboard
+6. one `clipdock batch <file>` run with a duplicate and one failure
+7. one `clipdock watch start/status/stop` lifecycle
+8. one `clipdock watch run --preset <name>` session with a supported URL copied into the clipboard
